@@ -1,9 +1,8 @@
 #!/bin/bash
 # snapshot-restore - Runs as init (PID 1) to restore a snapshot before normal boot
 # Called via GRUB with:
-#   init=/snapshots/restore.sh snapshot.restore=<name> snapshot.mode=<mode>
-# For external disk snapshots:
 #   init=/usr/local/bin/snapshot-restore snapshot.restore=<name> snapshot.mode=<mode>
+# For external disk snapshots, also pass:
 #   snapshot.disk=<UUID> snapshot.dir=<path-on-disk>
 #
 # Modes:
@@ -89,11 +88,12 @@ if [ -n "$SNAPSHOT_DISK" ]; then
     # snapshot.dir is partition-relative path (e.g., /snapshots)
     SNAPSHOT_BASE_DIR="${EXT_MOUNTPOINT}${SNAPSHOT_DISK_DIR}"
 else
-    # Local disk: determine from our own script location
-    SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-    SNAPSHOT_BASE_DIR="$(dirname "$SCRIPT_PATH")"
-    # Fallback: if can't determine, use /snapshots
-    [ -d "$SNAPSHOT_BASE_DIR" ] || SNAPSHOT_BASE_DIR="/snapshots"
+    # Local disk: read SNAPSHOT_DIR from config, fallback to /snapshots
+    SNAPSHOT_BASE_DIR="/snapshots"
+    if [ -f /etc/snapshot-manager.conf ]; then
+        _conf_dir=$(grep "^SNAPSHOT_DIR=" /etc/snapshot-manager.conf 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+        [ -n "$_conf_dir" ] && SNAPSHOT_BASE_DIR="$_conf_dir"
+    fi
 fi
 
 SNAPSHOT_PATH="${SNAPSHOT_BASE_DIR}/${SNAPSHOT_NAME}"

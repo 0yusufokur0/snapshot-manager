@@ -94,18 +94,10 @@ cp "${SCRIPT_DIR}/usr/local/bin/snapshot-manager" /usr/local/bin/snapshot-manage
 chmod +x /usr/local/bin/snapshot-manager
 echo -e "  ${GREEN}/usr/local/bin/snapshot-manager installed${NC}"
 
-# Install restore script (both locations)
+# Install restore script
 cp "${SCRIPT_DIR}/usr/local/bin/snapshot-restore" /usr/local/bin/snapshot-restore
 chmod +x /usr/local/bin/snapshot-restore
-
-# Also copy to snapshot dir so it's always accessible from GRUB
-# Remove immutable flag if updating
-chattr -i "${SNAPSHOT_DIR}/restore.sh" 2>/dev/null || true
-cp "${SCRIPT_DIR}/usr/local/bin/snapshot-restore" "${SNAPSHOT_DIR}/restore.sh"
-chmod +x "${SNAPSHOT_DIR}/restore.sh"
-# Make immutable to prevent accidental deletion (kernel panic risk)
-chattr +i "${SNAPSHOT_DIR}/restore.sh" 2>/dev/null || echo -e "  ${YELLOW}Warning: could not set immutable flag (filesystem may not support it)${NC}"
-echo -e "  ${GREEN}${SNAPSHOT_DIR}/restore.sh installed and protected (immutable)${NC}"
+echo -e "  ${GREEN}/usr/local/bin/snapshot-restore installed${NC}"
 
 # Install apt hook (automatic pre-upgrade snapshot)
 mkdir -p /etc/apt/apt.conf.d
@@ -132,6 +124,14 @@ echo -e "  ${GREEN}/usr/local/bin/snapshot-manager-gui installed${NC}"
 mkdir -p /usr/share/applications
 cp "${SCRIPT_DIR}/snapshot-manager.desktop" /usr/share/applications/snapshot-manager.desktop
 echo -e "  ${GREEN}/usr/share/applications/snapshot-manager.desktop installed${NC}"
+
+# Install polkit policy (required for pkexec GUI launch)
+mkdir -p /usr/share/polkit-1/actions
+cp "${SCRIPT_DIR}/etc/polkit-1/actions/com.snapshot-manager.gui.policy" /usr/share/polkit-1/actions/com.snapshot-manager.gui.policy
+echo -e "  ${GREEN}/usr/share/polkit-1/actions/com.snapshot-manager.gui.policy installed${NC}"
+
+# Update desktop database
+update-desktop-database /usr/share/applications 2>/dev/null || true
 
 # Install logrotate config (prevent log file growing indefinitely)
 if [[ -d /etc/logrotate.d ]]; then

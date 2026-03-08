@@ -73,7 +73,7 @@ fi
 SNAP_DEV=$(findmnt -n -o SOURCE --target "$SNAPSHOT_DIR" 2>/dev/null)
 GRUB_SEARCH_UUID="$ROOT_UUID"
 GRUB_SNAP_PREFIX="$SNAPSHOT_DIR"
-INIT_PATH="${SNAPSHOT_DIR}/restore.sh"
+INIT_PATH="/usr/local/bin/snapshot-restore"
 EXTRA_KPARAMS=""
 
 if [ -n "$SNAP_DEV" ] && [ "$SNAP_DEV" != "$ROOT_DEV" ]; then

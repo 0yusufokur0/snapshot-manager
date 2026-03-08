@@ -20,7 +20,7 @@ Unlike BTRFS/ZFS snapshots, this tool works on any standard Linux filesystem by 
 - **Single file restore** — Extract individual files without full system restore
 - **Snapshot diff** — Compare two snapshots to see what changed
 - **SHA256 verification** — Optional integrity manifests for snapshot validation
-- **Immutable restore script** — `restore.sh` protected with `chattr +i` against accidental deletion
+- **Polkit integration** — GUI launches with proper privilege escalation via pkexec
 - **Multi-language support** — English (default) and Turkish, configurable from GUI Settings or config file
 
 ## Quick Start
@@ -165,7 +165,16 @@ GENERATE_MANIFEST=false         # SHA256 integrity manifest
 
 2. **GRUB integration**: `/etc/grub.d/41_snapshots` generates boot menu entries. For external disks, it automatically detects the disk UUID and generates correct GRUB paths.
 
-3. **Boot-time restore**: When you select a snapshot from GRUB, the kernel boots with `init=/path/to/restore.sh`. The restore script runs as PID 1, mounts the filesystem read-write, runs rsync to restore, and reboots.
+3. **Boot-time restore**: When you select a snapshot from GRUB, the kernel boots with `init=/usr/local/bin/snapshot-restore`. The restore script runs as PID 1, reads the snapshot directory from config, runs rsync to restore, and reboots.
+
+## Uninstall
+
+```bash
+cd snapshot-manager
+sudo bash uninstall.sh
+```
+
+This removes all program files, configs, GRUB entries, and systemd timers. You will be asked whether to delete existing snapshots.
 
 ## Known Limitations
 

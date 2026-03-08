@@ -1,9 +1,10 @@
 [Desktop Entry]
 Name=Snapshot Manager
-Comment=System snapshot management
+Comment=System snapshot and restore manager
 Exec=/usr/local/bin/snapshot-manager-gui
-Icon=drive-harddisk-symbolic
+Icon=drive-harddisk
 Terminal=false
 Type=Application
-Categories=System;Utility;
+Categories=System;
 Keywords=snapshot;backup;restore;system;
+StartupNotify=true
