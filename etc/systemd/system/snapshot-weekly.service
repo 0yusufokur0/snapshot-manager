@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly automatic full snapshot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/snapshot-manager create full "Weekly automatic backup"
+Nice=19
+IOSchedulingClass=idle

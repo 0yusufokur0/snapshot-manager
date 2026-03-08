@@ -1,0 +1,169 @@
+#!/bin/bash
+# /etc/grub.d/41_snapshots - GRUB menu entry generator for snapshots
+# Each snapshot gets a submenu with restore mode options:
+#   - Full restore, System only, User data only, Kernel only
+# Supports snapshots on both local and external disks.
+
+set -e
+
+# Read SNAPSHOT_DIR from config if available, fallback to /snapshots
+SNAPSHOT_DIR="/snapshots"
+if [ -f /etc/snapshot-manager.conf ]; then
+    _conf_dir=$(grep "^SNAPSHOT_DIR=" /etc/snapshot-manager.conf 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+    [ -n "$_conf_dir" ] && SNAPSHOT_DIR="$_conf_dir"
+fi
+
+# Read language from config (en = English, tr = Turkish)
+LANG_CONF="en"
+if [ -f /etc/snapshot-manager.conf ]; then
+    _lang=$(grep "^LANGUAGE=" /etc/snapshot-manager.conf 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+    [ -n "$_lang" ] && LANG_CONF="$_lang"
+fi
+
+# Translation strings
+if [ "$LANG_CONF" = "tr" ]; then
+    L_SUBMENU="Snapshot Geri Yukleme >"
+    L_FULL_RESTORE="Tam Geri Yukleme (sistem + kullanici verileri)"
+    L_SYSTEM_ONLY="Yalnizca Sistem (kullanici verileri haric)"
+    L_USERDATA_ONLY="Yalnizca Kullanici Verileri (/home)"
+    L_KERNEL_ONLY="Yalnizca Kernel (/boot)"
+    L_SYSTEM_RESTORE="Sistem Geri Yukleme"
+    L_RESTORING="Geri yukleniyor"
+    L_MODE="Mod"
+    L_TYPE_SYSTEM="Sistem"
+    L_TYPE_FULL="Tam"
+else
+    L_SUBMENU="Snapshot Restore >"
+    L_FULL_RESTORE="Full Restore (system + user data)"
+    L_SYSTEM_ONLY="System Only (excluding user data)"
+    L_USERDATA_ONLY="User Data Only (/home)"
+    L_KERNEL_ONLY="Kernel Only (/boot)"
+    L_SYSTEM_RESTORE="System Restore"
+    L_RESTORING="Restoring"
+    L_MODE="Mode"
+    L_TYPE_SYSTEM="System"
+    L_TYPE_FULL="Full"
+fi
+
+# Exit silently if no snapshots exist
+if [ ! -d "$SNAPSHOT_DIR" ]; then
+    exit 0
+fi
+
+# Find valid snapshots
+SNAP_COUNT=0
+for snap in "$SNAPSHOT_DIR"/*/; do
+    [ -f "${snap}info.conf" ] && [ -f "${snap}boot/vmlinuz" ] && [ -f "${snap}boot/initrd.img" ] && SNAP_COUNT=$((SNAP_COUNT + 1))
+done
+
+if [ "$SNAP_COUNT" -eq 0 ]; then
+    exit 0
+fi
+
+# Get root partition UUID
+ROOT_DEV=$(findmnt -n -o SOURCE /)
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_DEV" 2>/dev/null)
+
+if [ -z "$ROOT_UUID" ]; then
+    echo "# snapshot-grub: root UUID not found" >&2
+    exit 0
+fi
+
+# Detect if SNAPSHOT_DIR is on a different device (external disk)
+SNAP_DEV=$(findmnt -n -o SOURCE --target "$SNAPSHOT_DIR" 2>/dev/null)
+GRUB_SEARCH_UUID="$ROOT_UUID"
+GRUB_SNAP_PREFIX="$SNAPSHOT_DIR"
+INIT_PATH="${SNAPSHOT_DIR}/restore.sh"
+EXTRA_KPARAMS=""
+
+if [ -n "$SNAP_DEV" ] && [ "$SNAP_DEV" != "$ROOT_DEV" ]; then
+    # Snapshots are on a different partition (external disk)
+    SNAP_UUID=$(blkid -s UUID -o value "$SNAP_DEV" 2>/dev/null)
+    SNAP_MOUNTPOINT=$(findmnt -n -o TARGET --target "$SNAPSHOT_DIR" 2>/dev/null)
+
+    if [ -n "$SNAP_UUID" ] && [ -n "$SNAP_MOUNTPOINT" ]; then
+        GRUB_SEARCH_UUID="$SNAP_UUID"
+        # Strip mount point prefix to get partition-relative path for GRUB
+        GRUB_SNAP_PREFIX="${SNAPSHOT_DIR#"$SNAP_MOUNTPOINT"}"
+        # init= must be on root filesystem (always available at boot)
+        INIT_PATH="/usr/local/bin/snapshot-restore"
+        EXTRA_KPARAMS="snapshot.disk=${SNAP_UUID} snapshot.dir=${GRUB_SNAP_PREFIX}"
+    else
+        echo "# snapshot-grub: could not get external disk UUID/mountpoint, skipping snapshots" >&2
+        exit 0
+    fi
+fi
+
+# Helper: generate a single menuentry
+gen_entry() {
+    local snap_name="$1"
+    local label="$2"
+    local mode="$3"
+
+    cat <<ENTRY
+        menuentry '$label' --class snapshots {
+            echo '$L_RESTORING: $snap_name'
+            echo '$L_MODE: $mode'
+            echo ''
+            search --no-floppy --fs-uuid --set=root $GRUB_SEARCH_UUID
+            linux ${GRUB_SNAP_PREFIX}/${snap_name}/boot/vmlinuz root=UUID=${ROOT_UUID} rw snapshot.restore=${snap_name} snapshot.mode=${mode} init=${INIT_PATH} ${EXTRA_KPARAMS}
+            initrd ${GRUB_SNAP_PREFIX}/${snap_name}/boot/initrd.img
+        }
+ENTRY
+}
+
+# Generate main submenu
+cat <<SUBMENU_START
+submenu '$L_SUBMENU' --class recovery {
+SUBMENU_START
+
+# List ALL snapshots newest first (no limit)
+for snap in $(find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -type d | sort -r); do
+    [ -f "${snap}/info.conf" ] || continue
+    [ -f "${snap}/boot/vmlinuz" ] || continue
+    [ -f "${snap}/boot/initrd.img" ] || continue
+
+    SNAP_NAME=$(basename "$snap")
+
+    # Read metadata
+    S_TYPE=$(grep "^TYPE=" "${snap}/info.conf" | cut -d= -f2-)
+    S_DATE=$(grep "^DATE=" "${snap}/info.conf" | cut -d= -f2-)
+    S_DESC=$(grep "^DESCRIPTION=" "${snap}/info.conf" | cut -d= -f2- | tr "'" " ")
+    S_KERNEL=$(grep "^KERNEL=" "${snap}/info.conf" | cut -d= -f2-)
+
+    # Format date for display: 2026.03.08 14:30:00
+    # Input format: YYYY-MM-DD_HH-MM-SS
+    DATE_PART="${S_DATE%%_*}"
+    TIME_PART="${S_DATE#*_}"
+    DISPLAY_DATE="${DATE_PART//-/.} ${TIME_PART//-/:}"
+
+    # Type label
+    if [ "$S_TYPE" = "system" ]; then
+        TYPE_LABEL="$L_TYPE_SYSTEM"
+    else
+        TYPE_LABEL="$L_TYPE_FULL"
+    fi
+
+    # Per-snapshot submenu with restore options
+    cat <<SNAP_SUB
+    submenu '[$TYPE_LABEL] $DISPLAY_DATE - $S_DESC' --class snapshots {
+SNAP_SUB
+
+    if [ "$S_TYPE" = "full" ]; then
+        # Full snapshot: has both system and user data
+        gen_entry "$SNAP_NAME" "$L_FULL_RESTORE" "full"
+        gen_entry "$SNAP_NAME" "$L_SYSTEM_ONLY" "system"
+        gen_entry "$SNAP_NAME" "$L_USERDATA_ONLY" "userdata"
+        gen_entry "$SNAP_NAME" "$L_KERNEL_ONLY" "kernel"
+    else
+        # System snapshot: no user data available
+        gen_entry "$SNAP_NAME" "$L_SYSTEM_RESTORE" "system"
+        gen_entry "$SNAP_NAME" "$L_KERNEL_ONLY" "kernel"
+    fi
+
+    echo "    }"
+done
+
+cat <<'SUBMENU_END'
+}
+SUBMENU_END

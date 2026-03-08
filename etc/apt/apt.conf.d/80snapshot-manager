@@ -1,0 +1,6 @@
+// Snapshot Manager - APT hook
+// Automatically creates a system snapshot before every package install/upgrade/remove
+// If snapshot fails, package operation continues anyway (|| true)
+// Runs at low priority with ionice+nice
+
+DPkg::Pre-Invoke { "if [ -x /usr/local/bin/snapshot-manager ]; then ionice -c3 nice -n 19 /usr/local/bin/snapshot-manager create system 'apt: automatic pre-upgrade backup' >> /var/log/snapshot-manager.log 2>&1 || true; fi"; };

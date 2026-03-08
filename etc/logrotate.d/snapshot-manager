@@ -1,0 +1,8 @@
+/var/log/snapshot-manager.log {
+    monthly
+    rotate 3
+    compress
+    missingok
+    notifempty
+    create 0644 root root
+}

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily automatic system snapshot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/snapshot-manager create system "Daily automatic backup"
+Nice=19
+IOSchedulingClass=idle

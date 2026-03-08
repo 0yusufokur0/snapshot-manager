@@ -1,0 +1,348 @@
+#!/bin/bash
+# snapshot-restore - Runs as init (PID 1) to restore a snapshot before normal boot
+# Called via GRUB with:
+#   init=/snapshots/restore.sh snapshot.restore=<name> snapshot.mode=<mode>
+# For external disk snapshots:
+#   init=/usr/local/bin/snapshot-restore snapshot.restore=<name> snapshot.mode=<mode>
+#   snapshot.disk=<UUID> snapshot.dir=<path-on-disk>
+#
+# Modes:
+#   full     - Restore everything (system + user data if available)
+#   system   - Restore system files only (exclude /home)
+#   userdata - Restore only /home (user data)
+#   kernel   - Restore only /boot (kernel + initramfs)
+#
+# If no snapshot.restore parameter is found, passes through to /sbin/init.
+
+# Mount essential virtual filesystems
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sys /sys 2>/dev/null
+mount -t devtmpfs dev /dev 2>/dev/null
+
+# Parse parameters from kernel command line
+SNAPSHOT_NAME=""
+RESTORE_MODE=""
+SNAPSHOT_DISK=""
+SNAPSHOT_DISK_DIR=""
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        snapshot.restore=*)
+            SNAPSHOT_NAME="${param#snapshot.restore=}"
+            ;;
+        snapshot.mode=*)
+            RESTORE_MODE="${param#snapshot.mode=}"
+            ;;
+        snapshot.disk=*)
+            SNAPSHOT_DISK="${param#snapshot.disk=}"
+            ;;
+        snapshot.dir=*)
+            SNAPSHOT_DISK_DIR="${param#snapshot.dir=}"
+            ;;
+    esac
+done
+
+# If no restore requested, continue normal boot
+if [ -z "$SNAPSHOT_NAME" ]; then
+    umount /proc /sys /dev 2>/dev/null
+    exec /sbin/init "$@"
+fi
+
+# Default mode
+[ -z "$RESTORE_MODE" ] && RESTORE_MODE="full"
+
+# Determine snapshot base directory
+EXTERNAL_MOUNTED=""
+if [ -n "$SNAPSHOT_DISK" ]; then
+    # External disk: mount by UUID and use snapshot.dir
+    EXT_MOUNTPOINT="/mnt/snapshot-disk"
+    mkdir -p "$EXT_MOUNTPOINT"
+
+    # Find device by UUID
+    EXT_DEV="/dev/disk/by-uuid/${SNAPSHOT_DISK}"
+    if [ ! -e "$EXT_DEV" ]; then
+        echo ""
+        echo "========================================"
+        echo "  ERROR: External disk not found!"
+        echo "  UUID: ${SNAPSHOT_DISK}"
+        echo "========================================"
+        echo ""
+        echo "Continuing with normal boot (5 seconds)..."
+        sleep 5
+        umount /proc /sys /dev 2>/dev/null
+        exec /sbin/init "$@"
+    fi
+
+    if ! mount "$EXT_DEV" "$EXT_MOUNTPOINT" 2>/dev/null; then
+        echo ""
+        echo "========================================"
+        echo "  ERROR: Failed to mount external disk!"
+        echo "  UUID: ${SNAPSHOT_DISK}"
+        echo "========================================"
+        echo ""
+        echo "Continuing with normal boot (5 seconds)..."
+        sleep 5
+        umount /proc /sys /dev 2>/dev/null
+        exec /sbin/init "$@"
+    fi
+    EXTERNAL_MOUNTED="$EXT_MOUNTPOINT"
+
+    # snapshot.dir is partition-relative path (e.g., /snapshots)
+    SNAPSHOT_BASE_DIR="${EXT_MOUNTPOINT}${SNAPSHOT_DISK_DIR}"
+else
+    # Local disk: determine from our own script location
+    SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    SNAPSHOT_BASE_DIR="$(dirname "$SCRIPT_PATH")"
+    # Fallback: if can't determine, use /snapshots
+    [ -d "$SNAPSHOT_BASE_DIR" ] || SNAPSHOT_BASE_DIR="/snapshots"
+fi
+
+SNAPSHOT_PATH="${SNAPSHOT_BASE_DIR}/${SNAPSHOT_NAME}"
+
+# Validate snapshot exists
+if [ ! -d "${SNAPSHOT_PATH}/fs" ]; then
+    echo ""
+    echo "========================================"
+    echo "  ERROR: Snapshot not found!"
+    echo "  ${SNAPSHOT_PATH}"
+    echo "========================================"
+    echo ""
+    echo "Continuing with normal boot (5 seconds)..."
+    sleep 5
+    [ -n "$EXTERNAL_MOUNTED" ] && umount "$EXTERNAL_MOUNTED" 2>/dev/null
+    umount /proc /sys /dev 2>/dev/null
+    exec /sbin/init "$@"
+fi
+
+# Read snapshot metadata
+SNAP_TYPE="system"
+DESCRIPTION=""
+if [ -f "${SNAPSHOT_PATH}/info.conf" ]; then
+    SNAP_TYPE=$(grep "^TYPE=" "${SNAPSHOT_PATH}/info.conf" | cut -d= -f2-)
+    DESCRIPTION=$(grep "^DESCRIPTION=" "${SNAPSHOT_PATH}/info.conf" | cut -d= -f2-)
+fi
+
+# Mode labels
+case "$RESTORE_MODE" in
+    full)     MODE_LABEL="Full Restore" ;;
+    system)   MODE_LABEL="System Only" ;;
+    userdata) MODE_LABEL="User Data Only" ;;
+    kernel)   MODE_LABEL="Kernel Only" ;;
+    *)        MODE_LABEL="Unknown ($RESTORE_MODE)" ;;
+esac
+
+# Validate mode against snapshot type
+if [ "$RESTORE_MODE" = "userdata" ] && [ "$SNAP_TYPE" = "system" ]; then
+    echo ""
+    echo "========================================"
+    echo "  ERROR: This snapshot does not contain user data!"
+    echo "  Snapshot type: System (excluding home)"
+    echo "========================================"
+    echo ""
+    echo "Continuing with normal boot (5 seconds)..."
+    sleep 5
+    [ -n "$EXTERNAL_MOUNTED" ] && umount "$EXTERNAL_MOUNTED" 2>/dev/null
+    umount /proc /sys /dev 2>/dev/null
+    exec /sbin/init "$@"
+fi
+
+if [ "$RESTORE_MODE" = "full" ] && [ "$SNAP_TYPE" = "system" ]; then
+    # System snapshot has no home data, treat as system restore
+    RESTORE_MODE="system"
+    MODE_LABEL="System Restore (no home data)"
+fi
+
+# Display restore info
+echo ""
+echo "========================================"
+echo "  SNAPSHOT RESTORE"
+echo "========================================"
+echo ""
+echo "  Snapshot    : ${SNAPSHOT_NAME}"
+echo "  Mode        : ${MODE_LABEL}"
+echo "  Description : ${DESCRIPTION}"
+[ -n "$SNAPSHOT_DISK" ] && echo "  Source      : External disk (UUID: ${SNAPSHOT_DISK})"
+echo ""
+echo "========================================"
+echo ""
+echo "Restore will begin in 5 seconds..."
+echo "Shut down the computer to cancel."
+echo ""
+
+sleep 5
+
+# Ensure root is mounted read-write
+if ! mount -o remount,rw /; then
+    echo ""
+    echo "========================================"
+    echo "  ERROR: Failed to mount root filesystem as rw!"
+    echo "  The filesystem may be damaged."
+    echo "  You may need to run fsck first."
+    echo "========================================"
+    echo ""
+    echo "Continuing with normal boot (10 seconds)..."
+    sleep 10
+    [ -n "$EXTERNAL_MOUNTED" ] && umount "$EXTERNAL_MOUNTED" 2>/dev/null
+    umount /proc /sys /dev 2>/dev/null
+    exec /sbin/init "$@"
+fi
+
+# Virtual/temp filesystem excludes (always)
+VIRT_EXCLUDES=""
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/proc"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/sys"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/dev"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/run"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/tmp"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/mnt"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/media"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/lost+found"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/swap.img"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/boot/efi"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/snap"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/swapfile"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/var/tmp"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/var/cache"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/var/log"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/var/lib/docker"
+VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=/var/lib/machines"
+# Exclude local snapshot dir if it exists (don't overwrite snapshots)
+if [ -z "$SNAPSHOT_DISK" ]; then
+    VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=${SNAPSHOT_BASE_DIR}"
+else
+    # Read SNAPSHOT_DIR from restored config to exclude it
+    _local_snap_dir="/snapshots"
+    if [ -f /etc/snapshot-manager.conf ]; then
+        _c=$(grep "^SNAPSHOT_DIR=" /etc/snapshot-manager.conf 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+        [ -n "$_c" ] && _local_snap_dir="$_c"
+    fi
+    VIRT_EXCLUDES="$VIRT_EXCLUDES --exclude=${_local_snap_dir}"
+fi
+
+RSYNC_EXIT=0
+
+case "$RESTORE_MODE" in
+    full)
+        # Restore everything the snapshot has
+        echo "Performing full restore..."
+        # shellcheck disable=SC2086
+        /usr/bin/rsync -aAXH --delete-after --info=progress2 \
+            $VIRT_EXCLUDES \
+            "${SNAPSHOT_PATH}/fs/" / || RSYNC_EXIT=$?
+        ;;
+
+    system)
+        # Restore system files only, skip /home
+        echo "Restoring system files..."
+        # shellcheck disable=SC2086
+        /usr/bin/rsync -aAXH --delete-after --info=progress2 \
+            $VIRT_EXCLUDES \
+            --exclude=/home \
+            "${SNAPSHOT_PATH}/fs/" / || RSYNC_EXIT=$?
+        ;;
+
+    userdata)
+        # Restore only /home from snapshot
+        echo "Restoring user data (/home)..."
+        if [ -d "${SNAPSHOT_PATH}/fs/home" ]; then
+            /usr/bin/rsync -aAXH --delete-after --info=progress2 \
+                "${SNAPSHOT_PATH}/fs/home/" /home/ || RSYNC_EXIT=$?
+        else
+            echo "ERROR: /home directory not found in snapshot!"
+            sleep 3
+            [ -n "$EXTERNAL_MOUNTED" ] && umount "$EXTERNAL_MOUNTED" 2>/dev/null
+            umount /proc /sys /dev 2>/dev/null
+            exec /sbin/init "$@"
+        fi
+        ;;
+
+    kernel)
+        # Restore only /boot (kernel + initramfs + grub config)
+        echo "Restoring kernel files (/boot)..."
+        if [ -d "${SNAPSHOT_PATH}/fs/boot" ]; then
+            /usr/bin/rsync -aAXH --delete-after --info=progress2 \
+                --exclude=/efi \
+                "${SNAPSHOT_PATH}/fs/boot/" /boot/ || RSYNC_EXIT=$?
+        else
+            echo "ERROR: /boot directory not found in snapshot!"
+            sleep 3
+            [ -n "$EXTERNAL_MOUNTED" ] && umount "$EXTERNAL_MOUNTED" 2>/dev/null
+            umount /proc /sys /dev 2>/dev/null
+            exec /sbin/init "$@"
+        fi
+        ;;
+
+    *)
+        echo "ERROR: Unknown mode: $RESTORE_MODE"
+        sleep 3
+        [ -n "$EXTERNAL_MOUNTED" ] && umount "$EXTERNAL_MOUNTED" 2>/dev/null
+        umount /proc /sys /dev 2>/dev/null
+        exec /sbin/init "$@"
+        ;;
+esac
+
+sync
+sync
+
+# Unmount external disk before reboot (if mounted)
+[ -n "$EXTERNAL_MOUNTED" ] && umount "$EXTERNAL_MOUNTED" 2>/dev/null
+
+# Check rsync result
+if [ "$RSYNC_EXIT" -ne 0 ] && [ "$RSYNC_EXIT" -ne 24 ] && [ "$RSYNC_EXIT" -ne 23 ]; then
+    echo ""
+    echo "========================================"
+    echo "  WARNING: An error occurred during restore!"
+    echo "  rsync exit code: $RSYNC_EXIT"
+    echo "  The system may be in an inconsistent state."
+    echo "  Continuing with normal boot..."
+    echo "========================================"
+    echo ""
+    sleep 10
+    # Graceful cleanup before fallback boot
+    echo s > /proc/sysrq-trigger 2>/dev/null
+    sleep 1
+    umount /proc /sys /dev 2>/dev/null
+    exec /sbin/init "$@"
+fi
+
+# Create a oneshot systemd service to update GRUB on next normal boot
+# (restored grub.cfg has stale snapshot entries)
+if [ "$RESTORE_MODE" = "full" ] || [ "$RESTORE_MODE" = "system" ] || [ "$RESTORE_MODE" = "kernel" ]; then
+    mkdir -p /etc/systemd/system/multi-user.target.wants
+    cat > /etc/systemd/system/snapshot-post-restore.service <<'SVCEOF'
+[Unit]
+Description=Update GRUB (after snapshot restore)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg
+ExecStartPost=/bin/rm -f /etc/systemd/system/snapshot-post-restore.service
+ExecStartPost=/bin/systemctl daemon-reload
+SVCEOF
+    ln -sf /etc/systemd/system/snapshot-post-restore.service \
+        /etc/systemd/system/multi-user.target.wants/snapshot-post-restore.service 2>/dev/null
+fi
+
+echo ""
+echo "========================================"
+echo "  RESTORE COMPLETED!"
+echo "  Mode: ${MODE_LABEL}"
+echo "========================================"
+echo ""
+if [ "$RESTORE_MODE" = "system" ] || [ "$RESTORE_MODE" = "full" ]; then
+    echo "  WARNING: System has been restored. The following"
+    echo "  may have reverted to the snapshot date:"
+    echo "    - User passwords"
+    echo "    - WiFi / network settings"
+    echo "    - Newly installed packages"
+    echo ""
+fi
+echo "System will reboot in 3 seconds..."
+sleep 3
+
+# Graceful reboot: sync -> remount-ro -> reboot
+echo s > /proc/sysrq-trigger
+sleep 1
+echo u > /proc/sysrq-trigger
+sleep 1
+echo b > /proc/sysrq-trigger

@@ -1,0 +1,21 @@
+#!/bin/bash
+# Updates GRUB snapshot entries and restore.sh after kernel installation
+# This script runs from /etc/kernel/postinst.d/ after a new kernel is installed
+
+# Read SNAPSHOT_DIR from config, fallback to /snapshots
+SNAPSHOT_DIR="/snapshots"
+if [ -f /etc/snapshot-manager.conf ]; then
+    _conf_dir=$(grep "^SNAPSHOT_DIR=" /etc/snapshot-manager.conf 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+    [ -n "$_conf_dir" ] && SNAPSHOT_DIR="$_conf_dir"
+fi
+
+# Only run if snapshot directory exists
+[ -d "$SNAPSHOT_DIR" ] || exit 0
+
+# Ensure restore.sh is up to date
+if [ -f /usr/local/bin/snapshot-restore ] && [ -d "$SNAPSHOT_DIR" ]; then
+    chattr -i "${SNAPSHOT_DIR}/restore.sh" 2>/dev/null
+    cp /usr/local/bin/snapshot-restore "${SNAPSHOT_DIR}/restore.sh"
+    chmod +x "${SNAPSHOT_DIR}/restore.sh"
+    chattr +i "${SNAPSHOT_DIR}/restore.sh" 2>/dev/null
+fi
