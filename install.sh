@@ -202,16 +202,14 @@ echo -e "${GREEN}  Installation complete!${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
 echo -e "Usage:"
-echo -e "  ${BLUE}sudo snapshot-manager create system${NC}    - System backup (excluding home)"
-echo -e "  ${BLUE}sudo snapshot-manager create full${NC}      - Full backup (including home)"
-echo -e "  ${BLUE}sudo snapshot-manager list${NC}             - List snapshots"
-echo -e "  ${BLUE}sudo snapshot-manager delete <name>${NC}    - Delete snapshot"
-echo -e "  ${BLUE}sudo snapshot-manager lock <name>${NC}      - Lock snapshot"
-echo -e "  ${BLUE}sudo snapshot-manager diff <s1> <s2>${NC}   - Compare two snapshots"
-echo -e "  ${BLUE}sudo snapshot-manager restore-file ...${NC} - Restore a single file"
-echo -e "  ${BLUE}sudo snapshot-manager verify <name>${NC}    - Verify snapshot"
-echo -e "  ${BLUE}sudo snapshot-manager status${NC}           - System status"
-echo -e "  ${BLUE}sudo snapshot-manager help${NC}             - All commands"
+echo -e "  ${BLUE}sudo snapshot-manager create${NC}             - Full backup (default, includes home)"
+echo -e "  ${BLUE}sudo snapshot-manager create system${NC}      - System backup (excludes home)"
+echo -e "  ${BLUE}sudo snapshot-manager list${NC}               - List all snapshots"
+echo -e "  ${BLUE}sudo snapshot-manager delete <name>${NC}      - Delete snapshot"
+echo -e "  ${BLUE}sudo snapshot-manager restore <name>${NC}     - Restore archived snapshot"
+echo -e "  ${BLUE}sudo snapshot-manager check${NC}              - Integrity check"
+echo -e "  ${BLUE}sudo snapshot-manager status${NC}             - System status"
+echo -e "  ${BLUE}sudo snapshot-manager help${NC}               - All commands"
 echo ""
 echo -e "Restore:"
 echo -e "  Restart the computer and select"
@@ -222,11 +220,11 @@ read -rp "" create_first
 
 if [[ "$create_first" == "y" ]]; then
     echo ""
-    echo "Which type? (1=System, 2=Full)"
+    echo "Which type? (1=Full, 2=System)"
     read -rp "> " snap_type
     if [[ "$snap_type" == "2" ]]; then
-        snapshot-manager create full "Initial installation backup"
-    else
         snapshot-manager create system "Initial installation backup"
+    else
+        snapshot-manager create full "Initial installation backup"
     fi
 fi
