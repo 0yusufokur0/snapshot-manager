@@ -42,6 +42,17 @@ if ! command -v rsync &>/dev/null; then
 fi
 echo -e "  rsync: ${GREEN}OK${NC}"
 
+# Check borg (optional but recommended)
+if ! command -v borg &>/dev/null; then
+    echo -e "${YELLOW}borgbackup not found. Installing for borg archival support...${NC}"
+    apt-get update -qq && apt-get install -y -qq borgbackup
+fi
+if command -v borg &>/dev/null; then
+    echo -e "  borg: ${GREEN}OK ($(borg --version))${NC}"
+else
+    echo -e "  borg: ${YELLOW}not installed (borg archival disabled)${NC}"
+fi
+
 # Check GRUB
 if [[ ! -d /etc/grub.d ]]; then
     echo -e "${RED}Error: GRUB not found. This tool requires GRUB2.${NC}"

@@ -1,6 +1,6 @@
 #!/bin/bash
-# snapshot-manager - ext4 rsync snapshot manager with GRUB integration
-# Usage: snapshot-manager {create|list|delete|lock|unlock|diff|restore-file|verify|status|help} [options]
+# snapshot-manager - rsync+hardlink snapshot system with GRUB restore
+# Usage: snapshot-manager {create|list|delete|restore|verify|check|lock|unlock|diff|restore-file|archive|status|help}
 
 set -euo pipefail
 
@@ -22,6 +22,24 @@ KEEP_WEEKLY="${KEEP_WEEKLY:-0}"
 KEEP_MONTHLY="${KEEP_MONTHLY:-0}"
 LOW_PRIORITY="${LOW_PRIORITY:-true}"
 GENERATE_MANIFEST="${GENERATE_MANIFEST:-false}"
+
+# Borg settings
+ARCHIVE_MODE="${ARCHIVE_MODE:-none}"
+BORG_REPO="${BORG_REPO:-}"
+BORG_COMPRESSION="${BORG_COMPRESSION:-zstd,3}"
+BORG_KEEP_DAILY="${BORG_KEEP_DAILY:-7}"
+BORG_KEEP_WEEKLY="${BORG_KEEP_WEEKLY:-4}"
+BORG_KEEP_MONTHLY="${BORG_KEEP_MONTHLY:-6}"
+MAX_RECENT_RSYNC="${MAX_RECENT_RSYNC:-3}"
+
+# Resolve borg repo path
+if [[ -z "$BORG_REPO" ]]; then
+    BORG_REPO="${SNAPSHOT_DIR}/.borg-repo"
+fi
+
+# Borg environment
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
+export BORG_RELOCATED_REPO_ACCESS_IS_OK=yes
 
 # Colors
 RED='\033[0;31m'
@@ -116,6 +134,185 @@ release_lock() {
 is_locked() {
     local snap_path="$1"
     [[ -f "${snap_path}/info.conf" ]] && grep -q "^LOCKED=true" "${snap_path}/info.conf" 2>/dev/null
+}
+
+# ============================================================
+# Borg helper functions
+# ============================================================
+
+borg_is_available() {
+    command -v borg &>/dev/null
+}
+
+borg_check_available() {
+    if ! borg_is_available; then
+        echo -e "${RED}Error: borg is not installed.${NC}"
+        echo -e "${YELLOW}Install with: sudo apt install borgbackup${NC}"
+        return 1
+    fi
+}
+
+borg_ensure_repo() {
+    if [[ ! -d "$BORG_REPO" ]]; then
+        echo -e "${YELLOW}Initializing borg repository: ${BORG_REPO}${NC}"
+        borg init --encryption=none "$BORG_REPO"
+        echo -e "${GREEN}Borg repository initialized.${NC}"
+    fi
+}
+
+borg_cmd() {
+    if [[ "$LOW_PRIORITY" == "true" ]]; then
+        ionice -c3 nice -n 19 borg "$@"
+    else
+        borg "$@"
+    fi
+}
+
+borg_archive_snapshot() {
+    local snap_path="$1"
+    local name="$2"
+
+    if [[ "$ARCHIVE_MODE" != "borg" ]]; then
+        return 0
+    fi
+
+    if ! borg_is_available; then
+        echo -e "${YELLOW}Warning: borg not installed, skipping archive.${NC}"
+        return 0
+    fi
+
+    borg_ensure_repo
+
+    echo ""
+    echo -e "${YELLOW}Archiving to borg repository...${NC}"
+
+    local borg_exit=0
+    # cd into fs/ so borg stores relative paths (etc/, usr/, not full absolute paths)
+    (cd "${snap_path}/fs" && borg_cmd create \
+        --compression "$BORG_COMPRESSION" \
+        --progress \
+        --stats \
+        "${BORG_REPO}::${name}" \
+        .) || borg_exit=$?
+
+    if [[ $borg_exit -eq 0 || $borg_exit -eq 1 ]]; then
+        echo -e "${GREEN}Borg archive created: ${name}${NC}"
+
+        # Determine type for per-type prune
+        local archive_type="system"
+        if [[ "$name" == full_* ]]; then
+            archive_type="full"
+        fi
+        borg_prune_archives "$archive_type"
+    else
+        echo -e "${RED}Warning: Borg archive failed (exit code: $borg_exit). rsync snapshot preserved.${NC}"
+    fi
+}
+
+borg_prune_archives() {
+    local type="${1:-}"
+    echo -e "${YELLOW}Pruning borg archives...${NC}"
+
+    # Prune per type (system/full separately) to avoid cross-type deletion
+    local types_to_prune=()
+    if [[ -n "$type" ]]; then
+        types_to_prune=("$type")
+    else
+        types_to_prune=("system" "full")
+    fi
+
+    for t in "${types_to_prune[@]}"; do
+        local prune_exit=0
+        borg_cmd prune \
+            --glob-archives "${t}_*" \
+            --keep-daily="$BORG_KEEP_DAILY" \
+            --keep-weekly="$BORG_KEEP_WEEKLY" \
+            --keep-monthly="$BORG_KEEP_MONTHLY" \
+            --stats \
+            "$BORG_REPO" || prune_exit=$?
+
+        if [[ $prune_exit -ne 0 ]]; then
+            echo -e "${YELLOW}Warning: Borg prune (${t}) returned exit code: $prune_exit${NC}"
+        fi
+    done
+}
+
+cleanup_rsync_for_borg() {
+    local type="$1"
+
+    # In borg mode, keep only MAX_RECENT_RSYNC rsync snapshots per type
+    local snapshots
+    snapshots=$(find "$SNAPSHOT_DIR" -maxdepth 1 -name "${type}_*" -type d | sort -r)
+    local count
+    count=$(echo "$snapshots" | grep -c . || true)
+
+    if [[ "$count" -gt "$MAX_RECENT_RSYNC" ]]; then
+        local to_delete
+        to_delete=$(echo "$snapshots" | tail -n +"$((MAX_RECENT_RSYNC + 1))")
+        for old_snap in $to_delete; do
+            if is_locked "$old_snap"; then
+                echo -e "${YELLOW}Skipping locked snapshot: $(basename "$old_snap")${NC}"
+                continue
+            fi
+            echo -e "${YELLOW}Removing old rsync snapshot (archived in borg): $(basename "$old_snap")${NC}"
+            rm -rf "$old_snap"
+        done
+    fi
+}
+
+archive_to_borg() {
+    local target="$1"
+    check_root
+
+    if ! borg_check_available; then
+        exit 1
+    fi
+
+    # Path traversal protection
+    if [[ "$target" == *"/"* || "$target" == *".."* ]]; then
+        echo -e "${RED}Error: Invalid snapshot name: ${target}${NC}"
+        exit 1
+    fi
+
+    local snap_path="${SNAPSHOT_DIR}/${target}"
+    if [[ ! -d "$snap_path" || ! -d "${snap_path}/fs" ]]; then
+        echo -e "${RED}Error: Snapshot not found: ${target}${NC}"
+        exit 1
+    fi
+
+    acquire_lock
+    trap release_lock EXIT
+
+    borg_ensure_repo
+
+    # Check if archive already exists
+    if borg list --short "$BORG_REPO" 2>/dev/null | grep -qx "$target"; then
+        echo -e "${YELLOW}Archive already exists in borg: ${target}${NC}"
+        return 0
+    fi
+
+    echo -e "${BLUE}============================================${NC}"
+    echo -e "${BLUE}  Archiving snapshot${NC}"
+    echo -e "${BLUE}  Name: ${target}${NC}"
+    echo -e "${BLUE}============================================${NC}"
+    echo ""
+
+    local borg_exit=0
+    # cd into fs/ so borg stores relative paths (etc/, usr/, not full absolute paths)
+    (cd "${snap_path}/fs" && borg_cmd create \
+        --compression "$BORG_COMPRESSION" \
+        --progress \
+        --stats \
+        "${BORG_REPO}::${target}" \
+        .) || borg_exit=$?
+
+    if [[ $borg_exit -eq 0 || $borg_exit -eq 1 ]]; then
+        echo ""
+        echo -e "${GREEN}Successfully archived: ${target}${NC}"
+    else
+        echo -e "${RED}Error: Borg archive failed (exit code: $borg_exit)${NC}"
+        exit 1
+    fi
 }
 
 create_snapshot() {
@@ -259,8 +456,15 @@ METAEOF
     size=$(du -sh "${snap_path}" 2>/dev/null | cut -f1)
     echo -e "${GREEN}Size: ${size}${NC}"
 
+    # Archive to borg (if enabled)
+    borg_archive_snapshot "$snap_path" "$name"
+
     # Cleanup old snapshots
-    cleanup_snapshots "$type"
+    if [[ "$ARCHIVE_MODE" == "borg" ]]; then
+        cleanup_rsync_for_borg "$type"
+    else
+        cleanup_snapshots "$type"
+    fi
 
     # Update GRUB
     echo ""
@@ -398,10 +602,34 @@ cleanup_by_policy() {
 list_snapshots() {
     ensure_snapshot_dir
 
+    # Collect local (rsync) snapshots
+    declare -A rsync_snaps
     local snapshots
-    snapshots=$(find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -type d ! -name ".*" | sort -r)
+    snapshots=$(find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -type d ! -name ".*" 2>/dev/null | sort -r)
+    for snap in $snapshots; do
+        local bname
+        bname=$(basename "$snap")
+        rsync_snaps["$bname"]=1
+    done
 
-    if [[ -z "$snapshots" ]]; then
+    # Collect archived snapshots
+    declare -A borg_snaps
+    if [[ -d "$BORG_REPO" ]] && borg_is_available; then
+        while IFS= read -r aname; do
+            [[ -n "$aname" ]] && borg_snaps["$aname"]=1
+        done < <(borg list --short "$BORG_REPO" 2>/dev/null)
+    fi
+
+    # Build unified list of all names
+    declare -A all_names
+    for name in "${!rsync_snaps[@]}"; do
+        all_names["$name"]=1
+    done
+    for name in "${!borg_snaps[@]}"; do
+        all_names["$name"]=1
+    done
+
+    if [[ ${#all_names[@]} -eq 0 ]]; then
         echo -e "${YELLOW}No snapshots found.${NC}"
         return
     fi
@@ -411,43 +639,67 @@ list_snapshots() {
     echo -e "${BLUE}============================================${NC}"
     echo ""
 
-    printf "%-4s %-36s %-8s %-10s %-6s %s\n" "#" "NAME" "TYPE" "SIZE" "LOCK" "DESCRIPTION"
-    printf "%-4s %-36s %-8s %-10s %-6s %s\n" "---" "----" "----" "----" "----" "-----------"
+    printf "%-4s %-36s %-8s %-12s %-10s %-6s %s\n" "#" "NAME" "TYPE" "STORAGE" "SIZE" "LOCK" "DESCRIPTION"
+    printf "%-4s %-36s %-8s %-12s %-10s %-6s %s\n" "---" "----" "----" "-------" "----" "----" "-----------"
+
+    # Sort all names (reverse for newest first)
+    local sorted_names
+    sorted_names=$(printf '%s\n' "${!all_names[@]}" | sort -r)
 
     local i=1
-    for snap in $snapshots; do
-        if [[ -f "${snap}/info.conf" ]]; then
-            local name type description size lock_status
-            name=$(grep "^NAME=" "${snap}/info.conf" | cut -d= -f2-)
-            type=$(grep "^TYPE=" "${snap}/info.conf" | cut -d= -f2-)
-            description=$(grep "^DESCRIPTION=" "${snap}/info.conf" | cut -d= -f2-)
-            size=$(du -sh "${snap}" 2>/dev/null | cut -f1)
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
 
-            local type_label
-            if [[ "$type" == "system" ]]; then
-                type_label="System"
-            else
-                type_label="Full"
-            fi
+        local in_rsync=false in_borg=false
+        [[ -n "${rsync_snaps[$name]:-}" ]] && in_rsync=true
+        [[ -n "${borg_snaps[$name]:-}" ]] && in_borg=true
 
-            if is_locked "$snap"; then
-                lock_status="LOCKED"
-            else
-                lock_status="-"
-            fi
-
-            printf "%-4s %-36s %-8s %-10s %-6s %s\n" "$i" "$name" "$type_label" "$size" "$lock_status" "$description"
-            i=$((i + 1))
+        # Determine storage location
+        local storage
+        if $in_rsync && $in_borg; then
+            storage="local+arch"
+        elif $in_rsync; then
+            storage="local"
+        else
+            storage="archived"
         fi
-    done
+
+        # Determine type
+        local type_label="System"
+        [[ "$name" == full_* ]] && type_label="Full"
+
+        # Size, lock, description from local snapshot
+        local size="-" lock_status="-" description=""
+        local snap_path="${SNAPSHOT_DIR}/${name}"
+        if $in_rsync && [[ -f "${snap_path}/info.conf" ]]; then
+            size=$(du -sh "${snap_path}" 2>/dev/null | cut -f1)
+            description=$(grep "^DESCRIPTION=" "${snap_path}/info.conf" | cut -d= -f2-)
+            if is_locked "$snap_path"; then
+                lock_status="LOCKED"
+            fi
+        fi
+
+        printf "%-4s %-36s %-8s %-12s %-10s %-6s %s\n" "$i" "$name" "$type_label" "$storage" "$size" "$lock_status" "$description"
+        i=$((i + 1))
+    done <<< "$sorted_names"
+
+    echo ""
+
+    # Storage summary
+    if [[ -d "$BORG_REPO" ]] && borg_is_available; then
+        local repo_size
+        repo_size=$(du -sh "$BORG_REPO" 2>/dev/null | cut -f1)
+        echo -e "  ${CYAN}Archive storage:${NC} ${repo_size} (deduplicated)"
+    fi
+    local total_size
+    total_size=$(du -sh "$SNAPSHOT_DIR" 2>/dev/null | cut -f1)
+    echo -e "  ${CYAN}Total storage:${NC} ${total_size}"
     echo ""
 }
 
 delete_snapshot() {
     local target="$1"
     check_root
-    acquire_lock
-    trap release_lock EXIT
 
     # Path traversal protection
     if [[ "$target" == *"/"* || "$target" == *".."* ]]; then
@@ -456,29 +708,222 @@ delete_snapshot() {
     fi
 
     local snap_path="${SNAPSHOT_DIR}/${target}"
-    if [[ ! -d "$snap_path" ]]; then
+    local in_rsync=false
+    local in_borg=false
+
+    [[ -d "$snap_path" ]] && in_rsync=true
+    if [[ -d "$BORG_REPO" ]] && borg_is_available; then
+        borg list --short "$BORG_REPO" 2>/dev/null | grep -qx "$target" && in_borg=true
+    fi
+
+    if ! $in_rsync && ! $in_borg; then
         echo -e "${RED}Error: Snapshot not found: ${target}${NC}"
         exit 1
     fi
 
-    # Check if locked
-    if is_locked "$snap_path"; then
+    # Check if local snapshot is locked
+    if $in_rsync && is_locked "$snap_path"; then
         echo -e "${RED}Error: This snapshot is locked. Unlock it before deleting:${NC}"
         echo -e "${RED}  sudo snapshot-manager unlock ${target}${NC}"
         exit 1
     fi
 
-    echo -e "${YELLOW}Deleting: ${target}${NC}"
-    rm -rf "$snap_path"
+    acquire_lock
+    trap release_lock EXIT
+
+    # Delete local snapshot if exists
+    if $in_rsync; then
+        echo -e "${YELLOW}Deleting local snapshot: ${target}${NC}"
+        rm -rf "$snap_path"
+        echo -e "${GREEN}Local snapshot deleted.${NC}"
+    fi
+
+    # Delete archive if exists
+    if $in_borg; then
+        echo -e "${YELLOW}Deleting archive: ${target}${NC}"
+        borg_cmd delete "${BORG_REPO}::${target}"
+        echo -e "${GREEN}Archive deleted.${NC}"
+    fi
+
     echo -e "${GREEN}Deleted: ${target}${NC}"
 
+    # Update GRUB only if local snapshot was removed
+    if $in_rsync; then
+        echo -e "${YELLOW}Updating GRUB menu...${NC}"
+        if command -v update-grub &>/dev/null; then
+            update-grub 2>&1 | tail -5
+        elif command -v grub-mkconfig &>/dev/null; then
+            grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tail -5
+        fi
+        echo -e "${GREEN}GRUB menu updated.${NC}"
+    fi
+}
+
+restore_snapshot() {
+    local target="$1"
+    check_root
+
+    # Path traversal protection
+    if [[ "$target" == *"/"* || "$target" == *".."* ]]; then
+        echo -e "${RED}Error: Invalid snapshot name: ${target}${NC}"
+        exit 1
+    fi
+
+    local snap_path="${SNAPSHOT_DIR}/${target}"
+
+    # If already available locally, nothing to do
+    if [[ -d "$snap_path" && -d "${snap_path}/fs" ]]; then
+        echo -e "${GREEN}Snapshot is already available locally: ${target}${NC}"
+        echo -e "${GREEN}Reboot and select 'Snapshot Restore >' in the GRUB menu.${NC}"
+        return 0
+    fi
+
+    # Check if it's in the archive
+    if ! borg_is_available || [[ ! -d "$BORG_REPO" ]]; then
+        echo -e "${RED}Error: Snapshot not found: ${target}${NC}"
+        exit 1
+    fi
+
+    if ! borg list --short "$BORG_REPO" 2>/dev/null | grep -qx "$target"; then
+        echo -e "${RED}Error: Snapshot not found: ${target}${NC}"
+        exit 1
+    fi
+
+    acquire_lock
+    trap release_lock EXIT
+
+    echo -e "${BLUE}============================================${NC}"
+    echo -e "${BLUE}  Restoring archived snapshot${NC}"
+    echo -e "${BLUE}  Name: ${target}${NC}"
+    echo -e "${BLUE}============================================${NC}"
+    echo ""
+
+    # Extract to temp dir first (safe against partial extraction)
+    local tmp_path="${SNAPSHOT_DIR}/.tmp-restore-$$"
+    mkdir -p "${tmp_path}/fs"
+    mkdir -p "${tmp_path}/boot"
+
+    # Cleanup temp dir on failure/interruption
+    trap 'rm -rf "$tmp_path" 2>/dev/null; release_lock' EXIT
+
+    echo -e "${YELLOW}Extracting from archive...${NC}"
+    local extract_exit=0
+    (cd "${tmp_path}/fs" && borg extract --progress "${BORG_REPO}::${target}") || extract_exit=$?
+
+    if [[ $extract_exit -ne 0 ]]; then
+        echo -e "${RED}Error: Extraction failed (exit code: $extract_exit)${NC}"
+        rm -rf "$tmp_path"
+        exit 1
+    fi
+
+    # Copy kernel and initramfs from extracted snapshot
+    local kernel_version
+    kernel_version=$(uname -r)
+    if [[ -f "${tmp_path}/fs/boot/vmlinuz-${kernel_version}" ]]; then
+        cp "${tmp_path}/fs/boot/vmlinuz-${kernel_version}" "${tmp_path}/boot/vmlinuz"
+    elif [[ -f "/boot/vmlinuz-${kernel_version}" ]]; then
+        cp "/boot/vmlinuz-${kernel_version}" "${tmp_path}/boot/vmlinuz"
+    elif [[ -f "/boot/vmlinuz" ]]; then
+        cp "/boot/vmlinuz" "${tmp_path}/boot/vmlinuz"
+    fi
+
+    if [[ -f "${tmp_path}/fs/boot/initrd.img-${kernel_version}" ]]; then
+        cp "${tmp_path}/fs/boot/initrd.img-${kernel_version}" "${tmp_path}/boot/initrd.img"
+    elif [[ -f "/boot/initrd.img-${kernel_version}" ]]; then
+        cp "/boot/initrd.img-${kernel_version}" "${tmp_path}/boot/initrd.img"
+    elif [[ -f "/boot/initrd.img" ]]; then
+        cp "/boot/initrd.img" "${tmp_path}/boot/initrd.img"
+    fi
+
+    # Determine type from name
+    local type="system"
+    [[ "$target" == full_* ]] && type="full"
+
+    # Extract date from name
+    local datepart
+    datepart=$(echo "$target" | sed "s/^${type}_//")
+
+    # Create info.conf
+    cat > "${tmp_path}/info.conf" <<METAEOF
+NAME=${target}
+TYPE=${type}
+DATE=${datepart}
+KERNEL=${kernel_version}
+DESCRIPTION=Restored from archive
+LOCKED=false
+METAEOF
+
+    # Rename temp to final (atomic on same filesystem)
+    mv "$tmp_path" "$snap_path"
+
+    echo ""
+    echo -e "${GREEN}Snapshot restored: ${target}${NC}"
+
+    local size
+    size=$(du -sh "${snap_path}" 2>/dev/null | cut -f1)
+    echo -e "${GREEN}Size: ${size}${NC}"
+
+    # Update GRUB
+    echo ""
     echo -e "${YELLOW}Updating GRUB menu...${NC}"
     if command -v update-grub &>/dev/null; then
         update-grub 2>&1 | tail -5
     elif command -v grub-mkconfig &>/dev/null; then
         grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tail -5
     fi
-    echo -e "${GREEN}GRUB menu updated.${NC}"
+    echo -e "${GREEN}GRUB menu updated. Reboot and select 'Snapshot Restore >' to restore.${NC}"
+}
+
+check_integrity() {
+    check_root
+    ensure_snapshot_dir
+
+    echo -e "${BLUE}============================================${NC}"
+    echo -e "${BLUE}  Integrity Check${NC}"
+    echo -e "${BLUE}============================================${NC}"
+    echo ""
+
+    # Check local snapshots
+    local snapshots
+    snapshots=$(find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -type d ! -name ".*" 2>/dev/null | sort -r)
+
+    if [[ -n "$snapshots" ]]; then
+        echo -e "${CYAN}Local snapshots:${NC}"
+        for snap in $snapshots; do
+            local name
+            name=$(basename "$snap")
+            if [[ -f "${snap}/info.conf" && -d "${snap}/fs" && -f "${snap}/boot/vmlinuz" ]]; then
+                echo -e "  ${GREEN}[OK]${NC} ${name}"
+            else
+                local issues=""
+                [[ ! -f "${snap}/info.conf" ]] && issues+="info.conf "
+                [[ ! -d "${snap}/fs" ]] && issues+="fs/ "
+                [[ ! -f "${snap}/boot/vmlinuz" ]] && issues+="vmlinuz "
+                echo -e "  ${RED}[WARN]${NC} ${name} (missing: ${issues})"
+            fi
+        done
+        echo ""
+    fi
+
+    # Check archive repository
+    if [[ -d "$BORG_REPO" ]] && borg_is_available; then
+        echo -e "${CYAN}Archive repository:${NC} ${BORG_REPO}"
+        echo ""
+        echo -e "${YELLOW}Checking repository integrity...${NC}"
+        local check_exit=0
+        borg_cmd check --progress "$BORG_REPO" || check_exit=$?
+
+        echo ""
+        if [[ $check_exit -eq 0 ]]; then
+            echo -e "${GREEN}Repository integrity check passed.${NC}"
+        elif [[ $check_exit -eq 1 ]]; then
+            echo -e "${YELLOW}Check completed with warnings.${NC}"
+        else
+            echo -e "${RED}Repository check FAILED (exit code: $check_exit)${NC}"
+        fi
+    else
+        echo -e "${YELLOW}No archive repository found.${NC}"
+    fi
 }
 
 lock_snapshot() {
@@ -815,14 +1260,34 @@ show_status() {
     echo -e "    Locked    : ${locked_count}"
     echo ""
 
+    # Archive info
+    if [[ -d "$BORG_REPO" ]] && borg_is_available; then
+        local archive_count archive_size
+        archive_count=$(borg list --short "$BORG_REPO" 2>/dev/null | wc -l)
+        archive_size=$(du -sh "$BORG_REPO" 2>/dev/null | cut -f1)
+        echo -e "  ${CYAN}Archived Snapshots:${NC}"
+        echo -e "    Count     : ${archive_count}"
+        echo -e "    Size      : ${archive_size} (deduplicated)"
+        echo ""
+    fi
+
     # Config summary
     echo -e "  ${CYAN}Configuration:${NC}"
     echo -e "    Directory        : ${SNAPSHOT_DIR}"
-    echo -e "    Max System       : ${MAX_SYSTEM_SNAPSHOTS} (0=unlimited)"
-    echo -e "    Max Full         : ${MAX_FULL_SNAPSHOTS} (0=unlimited)"
-    echo -e "    Daily retention  : ${KEEP_DAILY} (0=disabled)"
-    echo -e "    Weekly retention : ${KEEP_WEEKLY} (0=disabled)"
-    echo -e "    Monthly retention: ${KEEP_MONTHLY} (0=disabled)"
+    echo -e "    Archive mode     : ${ARCHIVE_MODE}"
+    if [[ "$ARCHIVE_MODE" == "borg" ]]; then
+        echo -e "    Compression      : ${BORG_COMPRESSION}"
+        echo -e "    Max local kept   : ${MAX_RECENT_RSYNC}"
+        echo -e "    Keep daily       : ${BORG_KEEP_DAILY}"
+        echo -e "    Keep weekly      : ${BORG_KEEP_WEEKLY}"
+        echo -e "    Keep monthly     : ${BORG_KEEP_MONTHLY}"
+    else
+        echo -e "    Max System       : ${MAX_SYSTEM_SNAPSHOTS} (0=unlimited)"
+        echo -e "    Max Full         : ${MAX_FULL_SNAPSHOTS} (0=unlimited)"
+        echo -e "    Daily retention  : ${KEEP_DAILY} (0=disabled)"
+        echo -e "    Weekly retention : ${KEEP_WEEKLY} (0=disabled)"
+        echo -e "    Monthly retention: ${KEEP_MONTHLY} (0=disabled)"
+    fi
     echo -e "    Low priority     : ${LOW_PRIORITY}"
     echo -e "    SHA256 manifest  : ${GENERATE_MANIFEST}"
     echo ""
@@ -844,51 +1309,59 @@ show_status() {
 }
 
 show_help() {
-    echo "Snapshot Manager - ext4 rsync snapshot manager"
+    echo "Snapshot Manager - rsync+hardlink snapshot system with GRUB restore"
     echo ""
     echo "Usage:"
     echo "  sudo snapshot-manager create [system|full] [description]"
     echo "  sudo snapshot-manager list"
     echo "  sudo snapshot-manager delete <snapshot_name>"
+    echo "  sudo snapshot-manager restore <snapshot_name>"
+    echo "  sudo snapshot-manager verify <snapshot_name>"
+    echo "  sudo snapshot-manager check"
     echo "  sudo snapshot-manager lock <snapshot_name>"
     echo "  sudo snapshot-manager unlock <snapshot_name>"
     echo "  sudo snapshot-manager diff <snapshot1> <snapshot2>"
     echo "  sudo snapshot-manager restore-file <snapshot> <file_path> [destination]"
-    echo "  sudo snapshot-manager verify <snapshot_name>"
+    echo "  sudo snapshot-manager archive <snapshot_name>"
     echo "  sudo snapshot-manager status"
     echo "  sudo snapshot-manager help"
+    echo ""
+    echo "Commands:"
+    echo "  create       Create a new snapshot (system or full)"
+    echo "  list         List all snapshots (local and archived)"
+    echo "  delete       Delete a snapshot (from local and/or archive)"
+    echo "  restore      Restore an archived snapshot for GRUB boot restore"
+    echo "  verify       Verify snapshot files and structure"
+    echo "  check        Run integrity check on all snapshots and archives"
+    echo "  lock/unlock  Protect a snapshot from automatic cleanup"
+    echo "  diff         Compare two snapshots"
+    echo "  restore-file Restore a single file from a snapshot"
+    echo "  archive      Manually archive a local snapshot"
+    echo "  status       Show system and snapshot status"
     echo ""
     echo "Examples:"
     echo "  sudo snapshot-manager create system"
     echo "  sudo snapshot-manager create full \"Before major update\""
     echo "  sudo snapshot-manager list"
     echo "  sudo snapshot-manager delete system_2026-03-08_14-30-00"
-    echo "  sudo snapshot-manager lock system_2026-03-08_14-30-00"
-    echo "  sudo snapshot-manager diff system_2026-03-01_02-00-00 system_2026-03-08_02-00-00"
-    echo "  sudo snapshot-manager restore-file system_2026-03-08_14-30-00 /etc/fstab"
-    echo "  sudo snapshot-manager verify system_2026-03-08_14-30-00"
-    echo "  sudo snapshot-manager status"
+    echo "  sudo snapshot-manager restore system_2026-03-08_14-30-00"
+    echo "  sudo snapshot-manager check"
     echo ""
     echo "Snapshot Types:"
     echo "  system  - System files (excluding /home)"
     echo "  full    - All files (including /home)"
     echo ""
-    echo "Retention Policy:"
-    echo "  Automatic cleanup can be configured by setting KEEP_DAILY, KEEP_WEEKLY,"
-    echo "  KEEP_MONTHLY values in /etc/snapshot-manager.conf."
-    echo "  Locked snapshots are protected from automatic cleanup."
+    echo "Storage:"
+    echo "  local     - Snapshot is on disk, ready for GRUB boot restore"
+    echo "  archived  - Snapshot is in archive (deduplicated, compressed)"
+    echo "              Use 'restore' to extract before GRUB boot restore"
     echo ""
-    echo "Scheduled Backups:"
-    echo "  sudo systemctl enable --now snapshot-daily.timer"
-    echo "  sudo systemctl enable --now snapshot-weekly.timer"
+    echo "Full Restore:"
+    echo "  Reboot and select 'Snapshot Restore >' in the GRUB menu."
+    echo "  For archived snapshots: first run 'restore' to extract,"
+    echo "  then reboot and select from GRUB."
     echo ""
-    echo "Restore:"
-    echo "  Reboot the computer, select the"
-    echo "  'Snapshot Restore' submenu in the GRUB menu,"
-    echo "  and choose the desired snapshot. It will be automatically"
-    echo "  restored and the system will reboot."
-    echo ""
-    echo "  To restore a single file:"
+    echo "Single File Restore:"
     echo "  sudo snapshot-manager restore-file <snapshot> <file_path>"
 }
 
@@ -906,6 +1379,13 @@ case "${1:-help}" in
             exit 1
         fi
         delete_snapshot "$2"
+        ;;
+    restore)
+        if [[ -z "${2:-}" ]]; then
+            echo -e "${RED}Error: Specify the snapshot name to restore.${NC}"
+            exit 1
+        fi
+        restore_snapshot "$2"
         ;;
     lock)
         if [[ -z "${2:-}" ]]; then
@@ -944,8 +1424,18 @@ case "${1:-help}" in
         fi
         verify_snapshot "$2"
         ;;
+    check)
+        check_integrity
+        ;;
     status)
         show_status
+        ;;
+    archive)
+        if [[ -z "${2:-}" ]]; then
+            echo -e "${RED}Error: Specify the snapshot name to archive.${NC}"
+            exit 1
+        fi
+        archive_to_borg "$2"
         ;;
     help|--help|-h)
         show_help
