@@ -527,7 +527,7 @@ cleanup_by_policy() {
     [[ -z "$snapshots" ]] && return
 
     # Build set of snapshots to keep
-    declare -A keep_set
+    declare -A keep_set=()
 
     # Always keep locked snapshots
     for snap in $snapshots; do
@@ -603,7 +603,7 @@ list_snapshots() {
     ensure_snapshot_dir
 
     # Collect local (rsync) snapshots
-    declare -A rsync_snaps
+    declare -A rsync_snaps=()
     local snapshots
     snapshots=$(find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -type d ! -name ".*" 2>/dev/null | sort -r)
     for snap in $snapshots; do
@@ -613,7 +613,7 @@ list_snapshots() {
     done
 
     # Collect archived snapshots
-    declare -A borg_snaps
+    declare -A borg_snaps=()
     if [[ -d "$BORG_REPO" ]] && borg_is_available; then
         while IFS= read -r aname; do
             [[ -n "$aname" ]] && borg_snaps["$aname"]=1
@@ -621,7 +621,7 @@ list_snapshots() {
     fi
 
     # Build unified list of all names
-    declare -A all_names
+    declare -A all_names=()
     for name in "${!rsync_snaps[@]}"; do
         all_names["$name"]=1
     done
