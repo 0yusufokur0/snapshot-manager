@@ -1054,7 +1054,7 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         box.append(group)
 
         type_row = Adw.ComboRow(title=_("create.type"))
-        type_model = Gtk.StringList.new([_("create.type_system"), _("create.type_full")])
+        type_model = Gtk.StringList.new([_("create.type_full"), _("create.type_system")])
         type_row.set_model(type_model)
         group.add(type_row)
 
@@ -1077,7 +1077,7 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         create_btn.set_size_request(200, -1)
 
         def on_create(btn):
-            snap_type = "system" if type_row.get_selected() == 0 else "full"
+            snap_type = "full" if type_row.get_selected() == 0 else "system"
             desc = desc_row.get_text().strip()
             args = ["create", snap_type]
             if desc:

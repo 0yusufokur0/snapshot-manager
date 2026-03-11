@@ -31,7 +31,7 @@ sudo snapshot-manager create [system|full] [description]
 | `system` | Backs up the root filesystem, excluding `/home`. |
 | `full`   | Backs up the root filesystem, including `/home`. |
 
-If no type is specified, `system` is the default.
+If no type is specified, `full` is the default.
 
 **What it does:**
 
@@ -51,7 +51,7 @@ sudo snapshot-manager create system "before kernel upgrade"
 # Create a full snapshot (includes /home)
 sudo snapshot-manager create full "weekly full backup"
 
-# Create a system snapshot with default type (system)
+# Create a snapshot with default type (full)
 sudo snapshot-manager create
 ```
 
@@ -70,6 +70,7 @@ Displays a table with the following columns:
 - **Name** -- Snapshot directory name (timestamp-based)
 - **Type** -- `system` or `full`
 - **Size** -- Disk space used (unique data, not counting hard links)
+- **Storage** -- `local` (on disk), `archived` (in borg), or `local+arch` (both)
 - **Lock** -- Whether the snapshot is locked (protected from auto-cleanup)
 - **Description** -- User-provided description
 
@@ -80,29 +81,30 @@ sudo snapshot-manager list
 ```
 
 ```
-Name                    Type    Size    Lock  Description
-20260307-143022         system  2.1G          before kernel upgrade
-20260308-090000         full    8.4G    *     weekly full backup
+Name                    Type    Size    Storage      Lock  Description
+full_2026-03-08_14-30   full    8.4G    local+arch   *     weekly full backup
+full_2026-03-07_10-00   full    -       archived           daily backup
+system_2026-03-06_02    system  2.1G    local              before kernel upgrade
 ```
 
 ---
 
 ### delete
 
-Delete a snapshot.
+Delete a snapshot from local disk and/or archive.
 
 ```
 sudo snapshot-manager delete <name>
 ```
 
-The command refuses to delete locked snapshots. Unlock the snapshot first if
-deletion is intended. After deletion, the GRUB menu is updated to remove the
-corresponding boot entry.
+Removes the snapshot from wherever it exists (local rsync directory, borg
+archive, or both). Refuses to delete locked snapshots. After deletion, the
+GRUB menu is updated.
 
 **Example:**
 
 ```bash
-sudo snapshot-manager delete 20260307-143022
+sudo snapshot-manager delete full_2026-03-07_10-00-00
 ```
 
 ---
@@ -235,6 +237,65 @@ Displays:
 
 ```bash
 sudo snapshot-manager status
+```
+
+---
+
+### restore
+
+Restore an archived snapshot back to local disk for GRUB boot restore.
+
+```
+sudo snapshot-manager restore <name>
+```
+
+Extracts a snapshot from the borg archive to the local snapshot directory,
+making it available in the GRUB boot menu. If the snapshot is already local,
+it informs you that no action is needed.
+
+**Example:**
+
+```bash
+sudo snapshot-manager restore full_2026-03-07_10-00-00
+```
+
+---
+
+### check
+
+Run integrity check on all snapshots and the archive repository.
+
+```
+sudo snapshot-manager check
+```
+
+Checks:
+- Local snapshots for essential files (boot/vmlinuz, boot/initrd.img, info.conf, fs/).
+- Borg repository integrity (if `ARCHIVE_MODE=borg`).
+
+**Example:**
+
+```bash
+sudo snapshot-manager check
+```
+
+---
+
+### archive
+
+Manually archive a local snapshot to the borg repository.
+
+```
+sudo snapshot-manager archive <name>
+```
+
+Archives the specified snapshot into the borg repository for space-efficient
+long-term storage. Only available when `ARCHIVE_MODE=borg`.
+
+**Example:**
+
+```bash
+sudo snapshot-manager archive full_2026-03-08_14-30-00
 ```
 
 ---

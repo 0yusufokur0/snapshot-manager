@@ -29,9 +29,12 @@ The main management tool. Handles all snapshot lifecycle operations:
 
 | Command | Description |
 |---------|-------------|
-| `create [system\|full] [description]` | Create a new snapshot |
-| `list` | List all snapshots with metadata |
-| `delete <name>` | Delete a snapshot (respects locks) |
+| `create [system\|full] [description]` | Create a new snapshot (default: full) |
+| `list` | List all snapshots (local and archived) |
+| `delete <name>` | Delete a snapshot (from local and/or archive) |
+| `restore <name>` | Restore an archived snapshot for GRUB boot restore |
+| `check` | Run integrity check on all snapshots and archives |
+| `archive <name>` | Manually archive a local snapshot |
 | `lock <name>` | Lock a snapshot (prevents auto-cleanup and deletion) |
 | `unlock <name>` | Unlock a snapshot |
 | `diff <snap1> <snap2>` | Show file-level differences between two snapshots |
@@ -40,8 +43,8 @@ The main management tool. Handles all snapshot lifecycle operations:
 | `status` | Show disk usage, snapshot counts, config, timer status |
 
 **Snapshot types:**
+- `full` - Everything including `/home`. Full system + user data backup (default).
 - `system` - System files only. Excludes `/home/*`. Useful for OS-level rollback.
-- `full` - Everything including `/home`. Full system + user data backup.
 
 **Concurrency control:** Uses `flock` on `/var/run/snapshot-manager.lock` to prevent concurrent snapshot operations.
 
@@ -125,12 +128,13 @@ When snapshots reside on a disk different from root:
 **Runs as:** Launched as normal user, auto-escalates to root via `pkexec`
 
 Full graphical interface providing:
-- Snapshot list with type, date, size, lock status, and description
+- Snapshot list with type, date, size, storage status, lock status, and description
 - Create/delete/lock/unlock operations
+- Archived snapshot restore and integrity checking
 - Snapshot diff viewer
 - Single-file restore
 - Snapshot verification
-- System status dashboard (disk usage, config, timer status)
+- System status dashboard (disk usage, snapshot counts, archive info, timer status)
 - Disk space warning when usage exceeds 85%
 - Dark/light theme support (inherits user's GNOME color-scheme preference)
 - **Multi-language support** (English and Turkish) with language selector in Settings
@@ -424,9 +428,20 @@ KEEP_WEEKLY=0                     # Keep latest per week for N weeks (0 = disabl
 KEEP_MONTHLY=0                    # Keep latest per month for N months (0 = disabled)
 LOW_PRIORITY=true                 # Run rsync with ionice -c3 + nice -n 19
 GENERATE_MANIFEST=false           # Generate SHA256 manifest after snapshot
+
+# Borg archival settings
+ARCHIVE_MODE=borg                 # none = rsync only, borg = rsync + borg archival
+BORG_REPO=""                      # Borg repo path (empty = SNAPSHOT_DIR/.borg-repo)
+BORG_COMPRESSION="zstd,3"        # Compression: none, lz4, zstd,N, zlib,N
+BORG_KEEP_DAILY=7                 # Borg retention: daily archives
+BORG_KEEP_WEEKLY=4                # Borg retention: weekly archives
+BORG_KEEP_MONTHLY=6              # Borg retention: monthly archives
+MAX_RECENT_RSYNC=3                # Recent rsync snapshots for GRUB (borg mode only)
 ```
 
 **Retention logic:** If any `KEEP_*` values are non-zero, the policy-based cleanup is used instead of `MAX_*_SNAPSHOTS`. Locked snapshots are always preserved regardless of retention policy.
+
+**Borg archival:** When `ARCHIVE_MODE=borg`, snapshots are archived into a Borg repository after creation. Only `MAX_RECENT_RSYNC` rsync snapshots are kept on disk for GRUB; older ones are pruned after archival. Borg provides chunk-level deduplication and compression for space-efficient long-term storage.
 
 ---
 

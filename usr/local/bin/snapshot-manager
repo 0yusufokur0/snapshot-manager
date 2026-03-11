@@ -1327,7 +1327,7 @@ show_help() {
     echo "  sudo snapshot-manager help"
     echo ""
     echo "Commands:"
-    echo "  create       Create a new snapshot (system or full)"
+    echo "  create       Create a new snapshot (default: full)"
     echo "  list         List all snapshots (local and archived)"
     echo "  delete       Delete a snapshot (from local and/or archive)"
     echo "  restore      Restore an archived snapshot for GRUB boot restore"
@@ -1368,7 +1368,7 @@ show_help() {
 # Main
 case "${1:-help}" in
     create)
-        create_snapshot "${2:-system}" "${3:-}"
+        create_snapshot "${2:-full}" "${3:-}"
         ;;
     list)
         list_snapshots

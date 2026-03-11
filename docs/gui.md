@@ -14,18 +14,19 @@ Key design points:
 
 ### Main Screen
 
-Lists all existing snapshots in a table showing:
+Lists all existing snapshots (local and archived) showing:
 
 - Snapshot name
 - Date created
 - Type (System / Full)
+- Storage badge (Local / Archived / Local+Archived)
 - Description
 
-A banner at the top displays **disk usage** and the current **storage location**.
+A banner at the top displays **disk usage** and the current **storage location**. An **integrity check** button in the header bar runs `check` on all snapshots and the archive repository.
 
 ### Create Snapshot
 
-- Select snapshot type: **System** or **Full**.
+- Select snapshot type: **Full** (default, includes /home) or **System** (excludes /home).
 - Enter a free-text description.
 - Real-time **progress bar** that parses rsync `--info=progress2` output.
 - **Cancel button** to abort an in-progress snapshot.
@@ -38,9 +39,16 @@ Click any snapshot in the list to view its full details:
 
 Available actions:
 
-- **Delete** the snapshot.
-- **Verify** snapshot integrity.
-- **Lock / Unlock** to protect against automatic retention cleanup.
+- **Restore** an archived snapshot to local disk for GRUB boot restore.
+- **Delete** the snapshot (from local and/or archive).
+- **Verify** snapshot integrity (local snapshots only).
+- **Lock / Unlock** to protect against automatic retention cleanup (local snapshots only).
+
+Archived snapshots show an info banner explaining that they need to be restored before GRUB boot restore is available.
+
+### Status Dialog
+
+Shows snapshot counts (system/full), archived snapshot count, archive repository size, and disk usage.
 
 ### Settings Dialog
 
@@ -54,6 +62,8 @@ Available actions:
 | **Scheduled backups** | Enable/disable daily and weekly systemd timers |
 
 Changing the language updates the `LANGUAGE` setting in `/etc/snapshot-manager.conf`. The GUI reloads all labels immediately. GRUB menu entries update on the next `update-grub` run (which happens automatically when creating or deleting snapshots).
+
+Settings save preserves all borg-related configuration keys (ARCHIVE_MODE, BORG_REPO, BORG_COMPRESSION, BORG_KEEP_*, MAX_RECENT_RSYNC) so that GUI edits don't overwrite borg settings.
 
 ### Disk Migration
 

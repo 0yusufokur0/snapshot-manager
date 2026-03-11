@@ -149,6 +149,106 @@ amount of data), but enables reliable integrity verification later.
 
 ---
 
+## Borg Archive Settings
+
+These settings control the optional Borg Backup archival backend.
+
+### ARCHIVE_MODE
+
+```bash
+ARCHIVE_MODE=borg
+```
+
+Controls whether snapshots are archived using Borg Backup for long-term
+storage with chunk-level deduplication.
+
+| Value  | Description |
+|--------|-------------|
+| `none` | rsync + hardlink only (no borg dependency) |
+| `borg` | rsync + borg archival (default) |
+
+When set to `borg`, each new snapshot is automatically archived into a Borg
+repository after creation. Only the most recent rsync snapshots are kept on
+disk for GRUB boot restore; older ones are stored space-efficiently in the
+Borg archive.
+
+---
+
+### BORG_REPO
+
+```bash
+BORG_REPO=""
+```
+
+Path to the Borg repository. Leave empty to use the default location
+(`SNAPSHOT_DIR/.borg-repo`).
+
+---
+
+### BORG_COMPRESSION
+
+```bash
+BORG_COMPRESSION="zstd,3"
+```
+
+Borg compression algorithm and level. Recommended: `zstd,3` (good balance
+of speed and compression).
+
+| Value | Description |
+|-------|-------------|
+| `none` | No compression |
+| `lz4` | Very fast, low compression |
+| `zstd,N` | Zstandard, level 1-22 |
+| `zlib,N` | zlib, level 0-9 |
+
+---
+
+### BORG_KEEP_DAILY
+
+```bash
+BORG_KEEP_DAILY=7
+```
+
+Number of daily borg archives to keep. Applied during borg pruning after
+each snapshot creation.
+
+---
+
+### BORG_KEEP_WEEKLY
+
+```bash
+BORG_KEEP_WEEKLY=4
+```
+
+Number of weekly borg archives to keep.
+
+---
+
+### BORG_KEEP_MONTHLY
+
+```bash
+BORG_KEEP_MONTHLY=6
+```
+
+Number of monthly borg archives to keep.
+
+---
+
+### MAX_RECENT_RSYNC
+
+```bash
+MAX_RECENT_RSYNC=3
+```
+
+Number of recent rsync snapshots to keep on disk for GRUB boot restore.
+Only used when `ARCHIVE_MODE=borg`. Older snapshots are archived in borg
+and removed from disk to save space.
+
+When `ARCHIVE_MODE=none`, the `KEEP_*` and `MAX_*` settings above are used
+instead.
+
+---
+
 ## Retention Policy Algorithm
 
 When `KEEP_DAILY`, `KEEP_WEEKLY`, or `KEEP_MONTHLY` are set to non-zero
