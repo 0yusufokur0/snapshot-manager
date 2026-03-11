@@ -105,6 +105,11 @@ TRANSLATIONS = {
         "detail.unlock_subtitle": "Allow automatic deletion of the snapshot",
         "detail.lock_subtitle": "Protect the snapshot from automatic deletion",
         "detail.verify_subtitle": "Check snapshot integrity",
+        "detail.restore": "Restore",
+        "detail.restore_subtitle": "Extract from archive for GRUB boot restore",
+        "detail.restoring": "Restoring...",
+        "detail.restore_result": "Restore Result",
+        "detail.archived_notice": "This snapshot is archived. Restore it to make it available for GRUB boot restore.",
         "detail.delete_subtitle": "Permanently delete this snapshot",
         "detail.delete_locked": "Unlock first",
         "detail.locking": "Locking...",
@@ -127,6 +132,16 @@ TRANSLATIONS = {
         "msg.verify_result": "Verification Result",
         "msg.timeout": "Operation timed out (10 minutes).",
         "msg.not_found": "snapshot-manager command not found. Was install.sh run?",
+        "msg.check_result": "Check Result",
+
+        # Storage labels
+        "snap.storage_local": "Local",
+        "snap.storage_archived": "Archived",
+        "snap.storage_both": "Local + Archived",
+
+        # Check
+        "tooltip.check": "Integrity Check",
+        "check.running": "Running integrity check...",
 
         # Settings dialog
         "settings.title": "Settings",
@@ -186,6 +201,8 @@ TRANSLATIONS = {
         "status.full": "Full",
         "status.total_count": "Total",
         "status.locked": "Locked",
+        "status.archived": "Archived",
+        "status.archive_size": "Archive Size",
     },
     "tr": {
         # Window & Header
@@ -258,6 +275,11 @@ TRANSLATIONS = {
         "detail.unlock_subtitle": "Snapshot'ın otomatik silinmesine izin ver",
         "detail.lock_subtitle": "Snapshot'ı otomatik silmeden koru",
         "detail.verify_subtitle": "Snapshot bütünlüğünü kontrol et",
+        "detail.restore": "Geri Yükle",
+        "detail.restore_subtitle": "Arşivden çıkar, GRUB ile geri yükleme için hazırla",
+        "detail.restoring": "Geri yükleniyor...",
+        "detail.restore_result": "Geri Yükleme Sonucu",
+        "detail.archived_notice": "Bu snapshot arşivlenmiş. GRUB ile geri yüklemek için önce 'Geri Yükle' butonuna tıklayın.",
         "detail.delete_subtitle": "Bu snapshot'ı kalıcı olarak sil",
         "detail.delete_locked": "Önce kilidi kaldırın",
         "detail.locking": "Kilitleniyor...",
@@ -280,6 +302,16 @@ TRANSLATIONS = {
         "msg.verify_result": "Doğrulama Sonucu",
         "msg.timeout": "İşlem zaman aşımına uğradı (10 dakika).",
         "msg.not_found": "snapshot-manager komutu bulunamadı. install.sh çalıştırıldı mı?",
+        "msg.check_result": "Kontrol Sonucu",
+
+        # Storage labels
+        "snap.storage_local": "Yerel",
+        "snap.storage_archived": "Arşiv",
+        "snap.storage_both": "Yerel + Arşiv",
+
+        # Check
+        "tooltip.check": "Bütünlük Kontrolü",
+        "check.running": "Bütünlük kontrolü yapılıyor...",
 
         # Settings dialog
         "settings.title": "Ayarlar",
@@ -339,6 +371,8 @@ TRANSLATIONS = {
         "status.full": "Tam",
         "status.total_count": "Toplam",
         "status.locked": "Kilitli",
+        "status.archived": "Arşivlenmiş",
+        "status.archive_size": "Arşiv Boyutu",
     },
 }
 
@@ -364,8 +398,8 @@ DISK_WARN_PCT = 85
 
 class SnapshotInfo:
     """Holds information about a single snapshot."""
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, path=None, archived_name=None):
+        self.path = path or ""
         self.name = ""
         self.type = ""
         self.date = ""
@@ -373,7 +407,22 @@ class SnapshotInfo:
         self.description = ""
         self.locked = False
         self.size = ""
-        self._parse()
+        self.storage = "local"  # "local", "archived", "local+arch"
+        if path:
+            self._parse()
+        elif archived_name:
+            self._parse_from_name(archived_name)
+
+    def _parse_from_name(self, name):
+        """Parse type and date from snapshot name (for archived-only snapshots)."""
+        self.name = name
+        self.storage = "archived"
+        if name.startswith("full_"):
+            self.type = "full"
+            self.date = name[5:]
+        elif name.startswith("system_"):
+            self.type = "system"
+            self.date = name[7:]
 
     def _parse(self):
         info_file = os.path.join(self.path, "info.conf")
@@ -425,6 +474,13 @@ def read_config():
         "LOW_PRIORITY": "true",
         "GENERATE_MANIFEST": "false",
         "LANGUAGE": "en",
+        "ARCHIVE_MODE": "none",
+        "BORG_REPO": "",
+        "BORG_COMPRESSION": "zstd,3",
+        "BORG_KEEP_DAILY": "7",
+        "BORG_KEEP_WEEKLY": "4",
+        "BORG_KEEP_MONTHLY": "6",
+        "MAX_RECENT_RSYNC": "3",
     }
     conf_path = "/etc/snapshot-manager.conf"
     if os.path.isfile(conf_path):
@@ -454,6 +510,46 @@ def get_snapshots(snapshot_dir):
             if os.path.isfile(info_file):
                 snapshots.append(SnapshotInfo(full))
     return snapshots
+
+
+def get_archived_names(config):
+    """Returns set of archived snapshot names from borg repository."""
+    snapshot_dir = config.get("SNAPSHOT_DIR", "/snapshots")
+    borg_repo = config.get("BORG_REPO", "") or os.path.join(snapshot_dir, ".borg-repo")
+    archive_mode = config.get("ARCHIVE_MODE", "none")
+    if archive_mode != "borg" or not os.path.isdir(borg_repo):
+        return set()
+    try:
+        env = {**os.environ,
+               "BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK": "yes",
+               "BORG_RELOCATED_REPO_ACCESS_IS_OK": "yes"}
+        result = subprocess.run(
+            ["borg", "list", "--short", borg_repo],
+            capture_output=True, text=True, timeout=30, env=env
+        )
+        if result.returncode == 0:
+            return set(line.strip() for line in result.stdout.strip().split("\n") if line.strip())
+    except Exception:
+        pass
+    return set()
+
+
+def get_archive_size(config):
+    """Returns human-readable size of borg repository."""
+    snapshot_dir = config.get("SNAPSHOT_DIR", "/snapshots")
+    borg_repo = config.get("BORG_REPO", "") or os.path.join(snapshot_dir, ".borg-repo")
+    if not os.path.isdir(borg_repo):
+        return None
+    try:
+        result = subprocess.run(
+            ["du", "-sh", borg_repo],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            return result.stdout.split()[0]
+    except Exception:
+        pass
+    return None
 
 
 def get_disk_info(snapshot_dir):
@@ -625,7 +721,9 @@ class SnapshotRow(Adw.ActionRow):
         super().__init__()
         self.snap = snap
         self.set_title(snap.name)
-        subtitle_parts = [snap.display_date, snap.type_label, snap.description]
+        subtitle_parts = [snap.display_date, snap.type_label]
+        if snap.description:
+            subtitle_parts.append(snap.description)
         self.set_subtitle(" · ".join(subtitle_parts))
 
         if snap.locked:
@@ -633,11 +731,15 @@ class SnapshotRow(Adw.ActionRow):
             lock_icon.set_tooltip_text(_("snap.locked_tooltip"))
             self.add_prefix(lock_icon)
 
-        if snap.type == "system":
+        if snap.storage == "archived":
+            type_icon = Gtk.Image.new_from_icon_name("folder-download-symbolic")
+            type_icon.set_tooltip_text(_("snap.storage_archived"))
+        elif snap.type == "system":
             type_icon = Gtk.Image.new_from_icon_name("computer-symbolic")
+            type_icon.set_tooltip_text(snap.type_label)
         else:
             type_icon = Gtk.Image.new_from_icon_name("drive-harddisk-symbolic")
-        type_icon.set_tooltip_text(snap.type_label)
+            type_icon.set_tooltip_text(snap.type_label)
         self.add_prefix(type_icon)
         self.set_activatable(True)
 
@@ -693,6 +795,11 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         settings_btn.set_tooltip_text(_("tooltip.settings"))
         settings_btn.connect("clicked", self._on_settings_clicked)
         header.pack_end(settings_btn)
+
+        check_btn = Gtk.Button(icon_name="emblem-ok-symbolic")
+        check_btn.set_tooltip_text(_("tooltip.check"))
+        check_btn.connect("clicked", self._on_check_clicked)
+        header.pack_end(check_btn)
 
         status_btn = Gtk.Button(icon_name="dialog-information-symbolic")
         status_btn.set_tooltip_text(_("tooltip.status"))
@@ -817,7 +924,22 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         self.progress_cancel_btn.set_sensitive(False)
 
     def _refresh_list(self):
-        snapshots = get_snapshots(self.config["SNAPSHOT_DIR"])
+        local_snaps = get_snapshots(self.config["SNAPSHOT_DIR"])
+        archived_names = get_archived_names(self.config)
+
+        # Merge: set storage attribute, add archived-only snapshots
+        local_names = set(s.name for s in local_snaps)
+        for snap in local_snaps:
+            snap.storage = "local+arch" if snap.name in archived_names else "local"
+
+        # Add archived-only snapshots
+        archived_only = archived_names - local_names
+        for name in sorted(archived_only, reverse=True):
+            local_snaps.append(SnapshotInfo(archived_name=name))
+
+        # Sort by name (newest first)
+        snapshots = sorted(local_snaps, key=lambda s: s.name, reverse=True)
+
         disk = get_disk_info(self.config["SNAPSHOT_DIR"])
 
         # Disk warning
@@ -868,18 +990,33 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         for snap in snapshots:
             row = SnapshotRow(snap)
             row.connect("activated", self._on_row_activated)
-            try:
-                result = subprocess.run(
-                    ["du", "-sh", snap.path],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0:
-                    size = result.stdout.split()[0]
-                    size_label = Gtk.Label(label=size)
-                    size_label.add_css_class("dim-label")
-                    row.add_suffix(size_label)
-            except Exception:
-                pass
+
+            # Storage badge
+            if snap.storage == "local+arch":
+                badge = Gtk.Label(label=_("snap.storage_both"))
+            elif snap.storage == "archived":
+                badge = Gtk.Label(label=_("snap.storage_archived"))
+            else:
+                badge = Gtk.Label(label=_("snap.storage_local"))
+            badge.add_css_class("dim-label")
+            badge.add_css_class("caption")
+            row.add_suffix(badge)
+
+            # Size (only for local snapshots)
+            if snap.storage != "archived" and snap.path:
+                try:
+                    result = subprocess.run(
+                        ["du", "-sh", snap.path],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        size = result.stdout.split()[0]
+                        size_label = Gtk.Label(label=size)
+                        size_label.add_css_class("dim-label")
+                        row.add_suffix(size_label)
+                except Exception:
+                    pass
+
             arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
             row.add_suffix(arrow)
             self.snap_group.add(row)
@@ -1126,47 +1263,88 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         info_group.add(self._info_row(_("detail.description"), snap.description))
         info_group.add(self._info_row(_("detail.status"), _("detail.locked") if snap.locked else _("detail.unlocked")))
 
-        try:
-            result = subprocess.run(
-                ["du", "-sh", snap.path], capture_output=True, text=True, timeout=5
+        # Storage type
+        if snap.storage == "local+arch":
+            storage_label = _("snap.storage_both")
+        elif snap.storage == "archived":
+            storage_label = _("snap.storage_archived")
+        else:
+            storage_label = _("snap.storage_local")
+        info_group.add(self._info_row("Storage", storage_label))
+
+        if snap.storage != "archived" and snap.path:
+            try:
+                result = subprocess.run(
+                    ["du", "-sh", snap.path], capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    info_group.add(self._info_row(_("detail.size"), result.stdout.split()[0]))
+            except Exception:
+                pass
+
+        # Archived notice
+        if snap.storage == "archived":
+            notice_group = Adw.PreferencesGroup()
+            box.append(notice_group)
+            notice_row = Adw.ActionRow(
+                title=_("detail.archived_notice"),
+                icon_name="dialog-warning-symbolic"
             )
-            if result.returncode == 0:
-                info_group.add(self._info_row(_("detail.size"), result.stdout.split()[0]))
-        except Exception:
-            pass
+            notice_row.add_css_class("warning")
+            notice_group.add(notice_row)
 
         actions_group = Adw.PreferencesGroup(title=_("detail.actions"))
         box.append(actions_group)
 
-        if snap.locked:
-            lock_row = Adw.ActionRow(title=_("detail.unlock"),
-                                     subtitle=_("detail.unlock_subtitle"))
-            lock_row.add_prefix(Gtk.Image.new_from_icon_name("changes-allow-symbolic"))
-            lock_btn = Gtk.Button(label=_("detail.unlock"), valign=Gtk.Align.CENTER)
-            lock_btn.connect("clicked", lambda b: self._do_action(
-                ["unlock", snap.name], _("detail.unlocking"), dialog))
-            lock_row.add_suffix(lock_btn)
-            lock_row.set_activatable_widget(lock_btn)
-        else:
-            lock_row = Adw.ActionRow(title=_("detail.lock"),
-                                     subtitle=_("detail.lock_subtitle"))
-            lock_row.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
-            lock_btn = Gtk.Button(label=_("detail.lock"), valign=Gtk.Align.CENTER)
-            lock_btn.connect("clicked", lambda b: self._do_action(
-                ["lock", snap.name], _("detail.locking"), dialog))
-            lock_row.add_suffix(lock_btn)
-            lock_row.set_activatable_widget(lock_btn)
-        actions_group.add(lock_row)
+        # Restore button (for archived snapshots)
+        if snap.storage in ("archived", "local+arch"):
+            restore_row = Adw.ActionRow(title=_("detail.restore"),
+                                        subtitle=_("detail.restore_subtitle"))
+            restore_row.add_prefix(Gtk.Image.new_from_icon_name("folder-download-symbolic"))
+            restore_btn = Gtk.Button(label=_("detail.restore"), valign=Gtk.Align.CENTER)
+            restore_btn.add_css_class("suggested-action")
+            if snap.storage == "local+arch":
+                restore_btn.set_sensitive(False)
+                restore_btn.set_tooltip_text(_("snap.storage_local"))
+            restore_btn.connect("clicked", lambda b: self._do_restore(snap.name, dialog))
+            restore_row.add_suffix(restore_btn)
+            restore_row.set_activatable_widget(restore_btn)
+            actions_group.add(restore_row)
 
-        verify_row = Adw.ActionRow(title=_("detail.verify"),
-                                   subtitle=_("detail.verify_subtitle"))
-        verify_row.add_prefix(Gtk.Image.new_from_icon_name("emblem-ok-symbolic"))
-        verify_btn = Gtk.Button(label=_("detail.verify"), valign=Gtk.Align.CENTER)
-        verify_btn.connect("clicked", lambda b: self._do_verify(snap.name, dialog))
-        verify_row.add_suffix(verify_btn)
-        verify_row.set_activatable_widget(verify_btn)
-        actions_group.add(verify_row)
+        # Lock/Unlock (only for local snapshots)
+        if snap.storage != "archived":
+            if snap.locked:
+                lock_row = Adw.ActionRow(title=_("detail.unlock"),
+                                         subtitle=_("detail.unlock_subtitle"))
+                lock_row.add_prefix(Gtk.Image.new_from_icon_name("changes-allow-symbolic"))
+                lock_btn = Gtk.Button(label=_("detail.unlock"), valign=Gtk.Align.CENTER)
+                lock_btn.connect("clicked", lambda b: self._do_action(
+                    ["unlock", snap.name], _("detail.unlocking"), dialog))
+                lock_row.add_suffix(lock_btn)
+                lock_row.set_activatable_widget(lock_btn)
+            else:
+                lock_row = Adw.ActionRow(title=_("detail.lock"),
+                                         subtitle=_("detail.lock_subtitle"))
+                lock_row.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
+                lock_btn = Gtk.Button(label=_("detail.lock"), valign=Gtk.Align.CENTER)
+                lock_btn.connect("clicked", lambda b: self._do_action(
+                    ["lock", snap.name], _("detail.locking"), dialog))
+                lock_row.add_suffix(lock_btn)
+                lock_row.set_activatable_widget(lock_btn)
+            actions_group.add(lock_row)
 
+        # Verify (only for local snapshots)
+        if snap.storage != "archived":
+            verify_row = Adw.ActionRow(title=_("detail.verify"),
+                                       subtitle=_("detail.verify_subtitle"))
+            verify_row.add_prefix(Gtk.Image.new_from_icon_name("emblem-ok-symbolic"))
+            verify_btn = Gtk.Button(label=_("detail.verify"), valign=Gtk.Align.CENTER)
+            verify_btn.connect("clicked", lambda b: self._do_verify(snap.name, dialog))
+            verify_row.add_suffix(verify_btn)
+            verify_row.set_activatable_widget(verify_btn)
+            actions_group.add(verify_row)
+
+        # Delete (works for both local and archived)
         delete_row = Adw.ActionRow(title=_("detail.delete"), subtitle=_("detail.delete_subtitle"))
         delete_row.add_prefix(Gtk.Image.new_from_icon_name("user-trash-symbolic"))
         delete_btn = Gtk.Button(label=_("detail.delete"), valign=Gtk.Align.CENTER)
@@ -1242,6 +1420,49 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         self._refresh_list()
         clean = re.sub(r'\033\[[0-9;]*m', '', stdout)
         self._show_message(_("msg.verify_result"), clean.strip())
+
+    def _do_restore(self, name, parent_dialog):
+        if parent_dialog:
+            parent_dialog.close()
+        self.spinner_label.set_label(_("detail.restoring"))
+        self.content_stack.set_visible_child_name("loading")
+
+        def run():
+            try:
+                stdout, stderr, rc = run_cmd(["restore", name])
+                GLib.idle_add(self._restore_done, rc, stdout, stderr)
+            except Exception as e:
+                GLib.idle_add(self._restore_done, 1, "", str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _restore_done(self, rc, stdout, stderr):
+        self._refresh_list()
+        clean = re.sub(r'\033\[[0-9;]*m', '', stdout + stderr)
+        if rc == 0:
+            self._show_message(_("detail.restore_result"), clean.strip())
+        else:
+            self._show_message(_("msg.error"), clean.strip(), error=True)
+
+    # ─── Integrity check ─────────────────────────────────────
+
+    def _on_check_clicked(self, _btn):
+        self.spinner_label.set_label(_("check.running"))
+        self.content_stack.set_visible_child_name("loading")
+
+        def run():
+            try:
+                stdout, stderr, rc = run_cmd(["check"])
+                GLib.idle_add(self._check_done, rc, stdout, stderr)
+            except Exception as e:
+                GLib.idle_add(self._check_done, 1, "", str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _check_done(self, rc, stdout, stderr):
+        self._refresh_list()
+        clean = re.sub(r'\033\[[0-9;]*m', '', stdout + stderr)
+        self._show_message(_("msg.check_result"), clean.strip())
 
     # ─── Settings ─────────────────────────────────────────────
 
@@ -1435,10 +1656,20 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
 
             new_lang = "en" if lang_row.get_selected() == 0 else "tr"
 
+            # Preserve borg settings from current config
+            archive_mode = self.config.get("ARCHIVE_MODE", "none")
+            borg_repo = self.config.get("BORG_REPO", "")
+            borg_compression = self.config.get("BORG_COMPRESSION", "zstd,3")
+            borg_keep_daily = self.config.get("BORG_KEEP_DAILY", "7")
+            borg_keep_weekly = self.config.get("BORG_KEEP_WEEKLY", "4")
+            borg_keep_monthly = self.config.get("BORG_KEEP_MONTHLY", "6")
+            max_recent_rsync = self.config.get("MAX_RECENT_RSYNC", "3")
+
             new_config = (
                 '# Snapshot Manager Configuration\n'
                 '# ================================\n\n'
-                f'SNAPSHOT_DIR="{new_dir}"\n\n'
+                f'SNAPSHOT_DIR="{new_dir}"\n'
+                f'LANGUAGE={new_lang}\n\n'
                 f'MAX_SYSTEM_SNAPSHOTS={int(max_sys_row.get_value())}\n'
                 f'MAX_FULL_SNAPSHOTS={int(max_full_row.get_value())}\n\n'
                 f'KEEP_DAILY={int(keep_daily_row.get_value())}\n'
@@ -1446,7 +1677,14 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
                 f'KEEP_MONTHLY={int(keep_monthly_row.get_value())}\n\n'
                 f'LOW_PRIORITY={"true" if low_prio_switch.get_active() else "false"}\n'
                 f'GENERATE_MANIFEST={"true" if manifest_switch.get_active() else "false"}\n\n'
-                f'LANGUAGE={new_lang}\n'
+                '# Archive Settings\n'
+                f'ARCHIVE_MODE={archive_mode}\n'
+                f'BORG_REPO="{borg_repo}"\n'
+                f'BORG_COMPRESSION="{borg_compression}"\n'
+                f'BORG_KEEP_DAILY={borg_keep_daily}\n'
+                f'BORG_KEEP_WEEKLY={borg_keep_weekly}\n'
+                f'BORG_KEEP_MONTHLY={borg_keep_monthly}\n'
+                f'MAX_RECENT_RSYNC={max_recent_rsync}\n'
             )
 
             old_lang = self.config.get("LANGUAGE", "en")
@@ -1784,6 +2022,14 @@ class SnapshotManagerWindow(Adw.ApplicationWindow):
         count_group.add(self._info_row(_("status.full"), str(full_count)))
         count_group.add(self._info_row(_("status.total_count"), str(len(snapshots))))
         count_group.add(self._info_row(_("status.locked"), str(locked_count)))
+
+        # Archive info
+        archived = get_archived_names(self.config)
+        if archived:
+            arch_size = get_archive_size(self.config)
+            count_group.add(self._info_row(_("status.archived"), str(len(archived))))
+            if arch_size:
+                count_group.add(self._info_row(_("status.archive_size"), arch_size))
 
         dialog.present(self)
 
